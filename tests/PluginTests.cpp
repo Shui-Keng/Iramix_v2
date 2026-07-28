@@ -1,5 +1,7 @@
 #include "iramix/plugin/PluginBridge.hpp"
 
+#include "iramix/persistence/SessionDocument.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -37,12 +39,15 @@ constexpr std::uint32_t kFrames = 256U;
 constexpr std::uint32_t kChannels = 2U;
 constexpr std::size_t kSamples =
     static_cast<std::size_t>(kFrames) * kChannels;
+constexpr std::uint32_t kStateCapacity = 65'536U;
 
 [[nodiscard]] iramix::plugin::PluginBridgeConfig makeConfig() {
     return {
         .maximumFrames = kFrames,
         .channelCount = kChannels,
         .deadline = std::chrono::milliseconds {5},
+        .maximumStateBytes = kStateCapacity,
+        .stateDeadline = std::chrono::milliseconds {250},
     };
 }
 
@@ -335,6 +340,304 @@ void testBridgeRejections(const std::filesystem::path& self) {
            "post_stop=1\n";
 }
 
+// Builds the smallest session that can legitimately carry a plugin record,
+// so the state blob under test travels the real persistence path rather
+// than being handed straight to the bridge.
+[[nodiscard]] iramix::persistence::SessionDocument makePluginSession(
+    std::vector<std::byte> state
+) {
+    namespace persistence = iramix::persistence;
+    persistence::SessionDocument document;
+    document.revision = 7U;
+    document.tracks.push_back({
+        .stableId = 1U,
+        .type = persistence::SessionTrackType::master,
+        .gain = 1.0F,
+        .color = 0U,
+        .name = "Master",
+    });
+    document.plugins.push_back({
+        .stableId = 2U,
+        .targetTrackId = 1U,
+        .format = persistence::SessionPluginFormat::clap,
+        .slotIndex = 0U,
+        .bypassed = false,
+        .identifier = "com.iramix.test.standin",
+        .name = "Stand-in",
+        .state = std::move(state),
+    });
+    return document;
+}
+
+[[nodiscard]] bool outputMatchesGain(
+    const std::vector<float>& input,
+    const std::vector<float>& output,
+    const float gain
+) {
+    bool matches = true;
+    for (std::size_t index = 0U; index < kSamples; ++index) {
+        matches = matches
+            && std::abs(output[index] - input[index] * gain) < 1e-6F;
+    }
+    return matches;
+}
+
+void testPluginStateRestoration(const std::filesystem::path& self) {
+    namespace plugin = iramix::plugin;
+    namespace persistence = iramix::persistence;
+
+    // A blob with a payload the host never interprets, exactly as a real
+    // plugin's state would be.
+    std::vector<std::byte> payload(256U);
+    for (std::size_t index = 0U; index < payload.size(); ++index) {
+        payload[index] = static_cast<std::byte>(index % 251U);
+    }
+    constexpr float restoredGain = 0.25F;
+    const auto authored = plugin::stub::encodeState(restoredGain, payload);
+
+    std::string error;
+    const auto encoded = persistence::serializeSessionDocument(
+        makePluginSession(authored),
+        error
+    );
+    require(error.empty(), error.c_str());
+    const auto decoded = persistence::deserializeSessionDocument(encoded);
+    require(decoded.ok(), decoded.error.c_str());
+    require(
+        decoded.document.plugins.size() == 1U
+            && decoded.document.plugins.front().state == authored,
+        "the session preserves the plugin state blob byte for byte"
+    );
+    const auto& stored = decoded.document.plugins.front().state;
+
+    auto bridge = plugin::PluginBridge::create(makeConfig(), error);
+    require(bridge != nullptr, error.c_str());
+    require(bridge->start(self, "normal", error), error.c_str());
+
+    const auto input = makeInput();
+    std::vector<float> output(kSamples, -1.0F);
+    require(
+        warmUp(*bridge, input, output),
+        "the plugin process services a block"
+    );
+    // Before restoration the stand-in runs its instantiation default, so a
+    // later change of coefficient cannot be mistaken for a no-op.
+    require(
+        outputMatchesGain(input, output, 0.5F),
+        "a freshly instantiated plugin runs its own default state"
+    );
+
+    const auto restoreStarted = std::chrono::steady_clock::now();
+    const auto restoreStatus = bridge->restoreState(stored);
+    const double restoreMilliseconds =
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - restoreStarted
+        ).count();
+    require(
+        restoreStatus == plugin::PluginStateStatus::ok,
+        "the live plugin accepts a session's stored state"
+    );
+
+    std::fill(output.begin(), output.end(), -1.0F);
+    require(
+        bridge->processBlock(input, output, kFrames)
+            == plugin::PluginBlockStatus::processed,
+        "audio still flows after a restore"
+    );
+    // The decisive assertion: the restored coefficient is audible in the
+    // rendered block, so the blob reached the DSP rather than merely
+    // crossing the process boundary.
+    require(
+        outputMatchesGain(input, output, restoredGain),
+        "restored state changes what the plugin renders"
+    );
+
+    const auto captureStarted = std::chrono::steady_clock::now();
+    std::vector<std::byte> captured;
+    const auto captureStatus = bridge->captureState(captured);
+    const double captureMilliseconds =
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - captureStarted
+        ).count();
+    require(
+        captureStatus == plugin::PluginStateStatus::ok,
+        "the live plugin hands its state back for saving"
+    );
+    require(
+        captured == stored,
+        "captured state round trips byte for byte, payload included"
+    );
+
+    // Saving what was captured must produce a document that still loads.
+    const auto resaved = persistence::serializeSessionDocument(
+        makePluginSession(captured),
+        error
+    );
+    require(error.empty(), error.c_str());
+    require(
+        persistence::deserializeSessionDocument(resaved).ok(),
+        "captured state is storable without further conversion"
+    );
+
+    const auto counters = bridge->counters();
+    bridge->stop();
+    require(
+        counters.stateRestores == 1U
+            && counters.stateCaptures == 1U
+            && counters.stateRejections == 0U
+            && counters.stateTimeouts == 0U,
+        "state counters record exactly what happened"
+    );
+
+    std::cout
+        << "Plugin state restoration: state_bytes=" << stored.size()
+        << ", payload_bytes=" << payload.size()
+        << ", schema_version=" << decoded.sourceSchemaVersion
+        << ", restored_gain=" << restoredGain
+        << ", restore_ms=" << restoreMilliseconds
+        << ", capture_ms=" << captureMilliseconds
+        << ", capture_identical=1, rejections=0, timeouts=0\n";
+}
+
+void testPluginStateRejections(const std::filesystem::path& self) {
+    namespace plugin = iramix::plugin;
+    std::string error;
+
+    // A bridge configured without a state region refuses transfer outright
+    // rather than growing the region while audio is running.
+    auto stateless = plugin::PluginBridge::create(
+        {
+            .maximumFrames = kFrames,
+            .channelCount = kChannels,
+            .deadline = std::chrono::milliseconds {5},
+            .maximumStateBytes = 0U,
+            .stateDeadline = std::chrono::milliseconds {250},
+        },
+        error
+    );
+    require(stateless != nullptr, error.c_str());
+    require(stateless->start(self, "normal", error), error.c_str());
+    require(
+        stateless->restoreState({}) == plugin::PluginStateStatus::unavailable,
+        "a bridge with no state region refuses a restore"
+    );
+    stateless->stop();
+
+    auto bridge = plugin::PluginBridge::create(makeConfig(), error);
+    require(bridge != nullptr, error.c_str());
+    std::vector<std::byte> scratch;
+    require(
+        bridge->restoreState({}) == plugin::PluginStateStatus::unavailable
+            && bridge->captureState(scratch)
+                == plugin::PluginStateStatus::unavailable,
+        "state transfer before start is refused, not queued"
+    );
+
+    require(bridge->start(self, "normal", error), error.c_str());
+    const auto input = makeInput();
+    std::vector<float> output(kSamples, -1.0F);
+    require(
+        warmUp(*bridge, input, output),
+        "the plugin process services a block"
+    );
+
+    const std::vector<std::byte> oversized(
+        static_cast<std::size_t>(kStateCapacity) + 1U,
+        std::byte {0}
+    );
+    require(
+        bridge->restoreState(oversized)
+            == plugin::PluginStateStatus::tooLarge,
+        "a blob larger than the region is refused before it is written"
+    );
+
+    const auto good = plugin::stub::encodeState(0.25F, {});
+    require(
+        bridge->restoreState(good) == plugin::PluginStateStatus::ok,
+        "a well-formed blob is accepted"
+    );
+
+    // Corrupting a byte in the payload area must fail the checksum, and the
+    // plugin must keep the state it already had rather than half-load.
+    auto corrupt = plugin::stub::encodeState(0.75F, {});
+    corrupt[5] ^= std::byte {0xFF};
+    require(
+        bridge->restoreState(corrupt)
+            == plugin::PluginStateStatus::rejectedByPlugin,
+        "a corrupt blob is rejected by the plugin"
+    );
+    std::fill(output.begin(), output.end(), -1.0F);
+    require(
+        bridge->processBlock(input, output, kFrames)
+            == plugin::PluginBlockStatus::processed
+            && outputMatchesGain(input, output, 0.25F),
+        "a rejected restore leaves the previous state in force"
+    );
+
+    const auto counters = bridge->counters();
+    bridge->stop();
+    require(
+        bridge->restoreState(good) == plugin::PluginStateStatus::unavailable,
+        "state transfer after stop is refused"
+    );
+    require(
+        counters.stateRestores == 1U && counters.stateRejections == 1U,
+        "a rejected restore is not counted as a restore"
+    );
+
+    std::cout
+        << "Plugin state rejections: no_region=1, before_start=2, "
+           "oversized=1, corrupt=1, after_stop=1, "
+           "previous_state_retained=1\n";
+}
+
+void testPluginStateOnDeadPlugin(const std::filesystem::path& self) {
+    namespace plugin = iramix::plugin;
+    std::string error;
+
+    auto config = makeConfig();
+    config.stateDeadline = std::chrono::milliseconds {100};
+    auto bridge = plugin::PluginBridge::create(config, error);
+    require(bridge != nullptr, error.c_str());
+    require(bridge->start(self, "crash", error), error.c_str());
+
+    const auto input = makeInput();
+    std::vector<float> output(kSamples, -1.0F);
+    require(
+        warmUp(*bridge, input, output),
+        "the crashing child services blocks before it dies"
+    );
+    for (std::size_t index = 0U; index < 20U; ++index) {
+        static_cast<void>(bridge->processBlock(input, output, kFrames));
+    }
+    require(!bridge->childRunning(), "the plugin process is gone");
+
+    // A save must not be held hostage by a plugin that no longer exists.
+    const auto started = std::chrono::steady_clock::now();
+    std::vector<std::byte> captured;
+    const auto status = bridge->captureState(captured);
+    const double elapsed = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started
+    ).count();
+    require(
+        status == plugin::PluginStateStatus::timedOut,
+        "capturing from a dead plugin reports a timeout"
+    );
+    require(captured.empty(), "a failed capture yields no state");
+    require(
+        elapsed < 1'000.0,
+        "a dead plugin costs one state deadline, not an unbounded stall"
+    );
+    const auto counters = bridge->counters();
+    bridge->stop();
+
+    std::cout
+        << "Plugin state on dead plugin: state_deadline_ms=100"
+        << ", observed_ms=" << elapsed
+        << ", timeouts=" << counters.stateTimeouts
+        << ", captured_bytes=0\n";
+}
+
 } // namespace
 
 int main(const int argc, char* argv[]) {
@@ -348,6 +651,9 @@ int main(const int argc, char* argv[]) {
     testPluginProcessTermination(self);
     testPluginProcessHang(self);
     testBridgeRejections(self);
+    testPluginStateRestoration(self);
+    testPluginStateRejections(self);
+    testPluginStateOnDeadPlugin(self);
     std::cout << "All Iramix plugin tests passed.\n";
     return EXIT_SUCCESS;
 }

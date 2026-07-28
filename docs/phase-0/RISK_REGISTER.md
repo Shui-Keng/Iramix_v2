@@ -15,7 +15,7 @@ Scoring: probability and impact range from 1 to 5. Priority is their product.
 | R-09 | ASIO proprietary developer agreement is not yet signed | 1 | 2 | 2 | Administrative action: register through the Steinberg Developer Portal before ASIO enters a public release build |
 | R-10 | Custom UI consumes capacity needed by audio engine | 4 | 4 | 16 | Limit widget set and measure delivery velocity at week 4 |
 | R-11 | Cross-platform behavior drifts | 4 | 4 | 16 | Three-OS CI plus screenshot and project round-trip tests |
-| R-12 | Plugin state blocks autosave or recovery | 3 | 4 | 12 | Snapshot asynchronously with size/time limits |
+| R-12 | Plugin state blocks autosave or recovery | 3 | 4 | 12 | Size and time limits measured: the state region is sized before audio flows, an oversized blob is refused before it is written, and a capture from a crashed plugin times out at its deadline rather than stalling. See `results/PLUGIN_STATE_RESTORATION_2026-07-28.md`. Capture is not wired into the autosave window yet, so the end-to-end interaction is still unexercised |
 | R-13 | No macOS or Linux hardware is available to the project | 5 | 4 | 20 | **Accepted for Phase 0.** Hosted three-OS CI covers portability, correctness, and sanitizers; performance evidence is Windows-only by decision. See "Reference-hardware coverage gap" |
 | R-14 | Redistributing third-party binaries without required attribution | 2 | 4 | 8 | Skiko runtime jars ship Skia and ICU binaries with no notice file; obligations L-1 to L-4 tracked in `DEPENDENCIES.md` and gated before any distributable build |
 

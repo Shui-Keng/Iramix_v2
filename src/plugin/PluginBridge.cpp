@@ -29,6 +29,16 @@ namespace {
 constexpr std::uint32_t kMaximumChannelCount = 64U;
 constexpr std::uint32_t kMaximumFrames = 16'384U;
 constexpr std::uint32_t kControlMagic = 0x49'52'50'42U; // "IRPB"
+// Matches kMaximumPluginStateBytes in the session schema: a blob the
+// persistence layer would refuse to store must not be transferable either.
+constexpr std::uint32_t kMaximumStateBytes = 16'777'216U;
+
+constexpr std::uint32_t kStateRequestNone = 0U;
+constexpr std::uint32_t kStateRequestRestore = 1U;
+constexpr std::uint32_t kStateRequestCapture = 2U;
+
+constexpr std::uint32_t kStateResultOk = 0U;
+constexpr std::uint32_t kStateResultRejected = 1U;
 
 // Laid out for cross-process sharing: fixed-width, lock-free atomics only,
 // no pointers, no virtuals. Both processes map the same bytes.
@@ -42,6 +52,15 @@ struct SharedControl final {
     std::atomic<std::uint32_t> frameCount;
     std::atomic<std::uint32_t> childReady;
     std::atomic<std::uint32_t> parentProcessId;
+    // State transfer rides its own sequence pair rather than the audio one:
+    // the child applies a blob strictly between blocks, so audio is never
+    // rendered against a half-restored plugin.
+    std::atomic<std::uint32_t> maximumStateBytes;
+    std::atomic<std::uint32_t> stateBytes;
+    std::atomic<std::uint32_t> stateRequest;
+    std::atomic<std::uint32_t> stateSequence;
+    std::atomic<std::uint32_t> stateCompletion;
+    std::atomic<std::uint32_t> stateResult;
 };
 
 static_assert(
@@ -51,11 +70,13 @@ static_assert(
 
 [[nodiscard]] std::size_t regionBytes(
     const std::uint32_t maximumFrames,
-    const std::uint32_t channelCount
+    const std::uint32_t channelCount,
+    const std::uint32_t maximumStateBytes
 ) noexcept {
     const auto samples = static_cast<std::size_t>(maximumFrames)
         * static_cast<std::size_t>(channelCount);
-    return sizeof(SharedControl) + samples * sizeof(float) * 2U;
+    return sizeof(SharedControl) + samples * sizeof(float) * 2U
+        + static_cast<std::size_t>(maximumStateBytes);
 }
 
 [[nodiscard]] float* inputBase(SharedControl* const control) noexcept {
@@ -69,6 +90,13 @@ static_assert(
     const std::size_t samples
 ) noexcept {
     return inputBase(control) + samples;
+}
+
+[[nodiscard]] std::byte* stateBase(
+    SharedControl* const control,
+    const std::size_t samples
+) noexcept {
+    return reinterpret_cast<std::byte*>(outputBase(control, samples) + samples);
 }
 
 // macOS caps POSIX shared-memory and semaphore names at 31 characters
@@ -107,6 +135,37 @@ static_assert(
     return token;
 }
 
+constexpr std::uint32_t kStubStateMagic = 0x49'52'50'53U; // "IRPS"
+constexpr std::size_t kStubStateOverhead = 16U; // header 12 + checksum 4
+
+[[nodiscard]] std::uint32_t stateChecksum(
+    const std::byte* const bytes,
+    const std::size_t length
+) noexcept {
+    std::uint32_t hash = 2'166'136'261U;
+    for (std::size_t index = 0U; index < length; ++index) {
+        hash ^= static_cast<std::uint32_t>(bytes[index]);
+        hash *= 16'777'619U;
+    }
+    return hash;
+}
+
+void writeLittleEndian(std::byte* const destination, const std::uint32_t value)
+    noexcept {
+    destination[0] = static_cast<std::byte>(value & 0xFFU);
+    destination[1] = static_cast<std::byte>((value >> 8U) & 0xFFU);
+    destination[2] = static_cast<std::byte>((value >> 16U) & 0xFFU);
+    destination[3] = static_cast<std::byte>((value >> 24U) & 0xFFU);
+}
+
+[[nodiscard]] std::uint32_t readLittleEndian(const std::byte* const source)
+    noexcept {
+    return static_cast<std::uint32_t>(source[0])
+        | (static_cast<std::uint32_t>(source[1]) << 8U)
+        | (static_cast<std::uint32_t>(source[2]) << 16U)
+        | (static_cast<std::uint32_t>(source[3]) << 24U);
+}
+
 [[nodiscard]] std::string semaphorePath(const std::string& token) {
 #if defined(_WIN32)
     return "Local\\" + token + "e";
@@ -116,6 +175,59 @@ static_assert(
 }
 
 } // namespace
+
+namespace stub {
+
+std::vector<std::byte> encodeState(
+    const float gain,
+    const std::span<const std::byte> payload
+) {
+    std::vector<std::byte> blob(kStubStateOverhead + payload.size());
+    std::uint32_t gainBits = 0U;
+    std::memcpy(&gainBits, &gain, sizeof(gainBits));
+    writeLittleEndian(blob.data(), kStubStateMagic);
+    writeLittleEndian(blob.data() + 4U, gainBits);
+    writeLittleEndian(
+        blob.data() + 8U,
+        static_cast<std::uint32_t>(payload.size())
+    );
+    if (!payload.empty()) {
+        std::memcpy(blob.data() + 12U, payload.data(), payload.size());
+    }
+    const auto covered = blob.size() - 4U;
+    writeLittleEndian(
+        blob.data() + covered,
+        stateChecksum(blob.data(), covered)
+    );
+    return blob;
+}
+
+bool decodeStateGain(
+    const std::span<const std::byte> state,
+    float& gain
+) noexcept {
+    if (state.size() < kStubStateOverhead
+        || readLittleEndian(state.data()) != kStubStateMagic) {
+        return false;
+    }
+    const auto payloadLength = readLittleEndian(state.data() + 8U);
+    if (static_cast<std::size_t>(payloadLength) + kStubStateOverhead
+        != state.size()) {
+        return false;
+    }
+    const auto covered = state.size() - 4U;
+    if (readLittleEndian(state.data() + covered)
+        != stateChecksum(state.data(), covered)) {
+        return false;
+    }
+    const auto bits = readLittleEndian(state.data() + 4U);
+    float decoded = 0.0F;
+    std::memcpy(&decoded, &bits, sizeof(decoded));
+    gain = decoded;
+    return true;
+}
+
+} // namespace stub
 
 struct PluginBridge::Impl final {
     PluginBridgeConfig config {};
@@ -198,6 +310,22 @@ struct PluginBridge::Impl final {
         return static_cast<std::size_t>(config.maximumFrames)
             * static_cast<std::size_t>(config.channelCount);
     }
+
+    // Unlike processBlock this may sleep, because state transfer runs on
+    // the control thread. It is still bounded: a plugin that never answers
+    // delays one save or one load and is then given up on.
+    [[nodiscard]] bool awaitState(const std::uint32_t sequence) noexcept {
+        const auto expiry =
+            std::chrono::steady_clock::now() + config.stateDeadline;
+        while (control->stateCompletion.load(std::memory_order_acquire)
+            != sequence) {
+            if (std::chrono::steady_clock::now() >= expiry) {
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds {1});
+        }
+        return true;
+    }
 };
 
 PluginBridge::PluginBridge(std::unique_ptr<Impl> impl)
@@ -216,7 +344,10 @@ std::unique_ptr<PluginBridge> PluginBridge::create(
         || config.maximumFrames > kMaximumFrames
         || config.channelCount == 0U
         || config.channelCount > kMaximumChannelCount
-        || config.deadline <= std::chrono::microseconds::zero()) {
+        || config.deadline <= std::chrono::microseconds::zero()
+        || config.maximumStateBytes > kMaximumStateBytes
+        || (config.maximumStateBytes > 0U
+            && config.stateDeadline <= std::chrono::milliseconds::zero())) {
         error = "plugin bridge configuration is out of range";
         return {};
     }
@@ -230,8 +361,11 @@ std::unique_ptr<PluginBridge> PluginBridge::create(
     }
     impl->config = config;
 
-    const auto bytes =
-        regionBytes(config.maximumFrames, config.channelCount);
+    const auto bytes = regionBytes(
+        config.maximumFrames,
+        config.channelCount,
+        config.maximumStateBytes
+    );
     impl->mappedBytes = bytes;
 
     // A per-instance name so concurrent bridges, including two in one test
@@ -329,6 +463,10 @@ std::unique_ptr<PluginBridge> PluginBridge::create(
     );
     impl->control->channelCount.store(
         config.channelCount,
+        std::memory_order_relaxed
+    );
+    impl->control->maximumStateBytes.store(
+        config.maximumStateBytes,
         std::memory_order_relaxed
     );
 #if defined(_WIN32)
@@ -479,6 +617,107 @@ PluginBridgeCounters PluginBridge::counters() const noexcept {
     return impl_->counters;
 }
 
+PluginStateStatus PluginBridge::restoreState(
+    const std::span<const std::byte> state
+) {
+    if (!impl_->started
+        || impl_->control == nullptr
+        || impl_->config.maximumStateBytes == 0U) {
+        return PluginStateStatus::unavailable;
+    }
+    if (state.size() > impl_->config.maximumStateBytes) {
+        // Refused before anything is written: an oversized blob must not
+        // reach the shared region at all.
+        return PluginStateStatus::tooLarge;
+    }
+
+    auto* const control = impl_->control;
+    if (!state.empty()) {
+        std::memcpy(
+            stateBase(control, impl_->sampleCount()),
+            state.data(),
+            state.size()
+        );
+    }
+    control->stateBytes.store(
+        static_cast<std::uint32_t>(state.size()),
+        std::memory_order_relaxed
+    );
+    control->stateRequest.store(
+        kStateRequestRestore,
+        std::memory_order_relaxed
+    );
+    const auto sequence =
+        control->stateSequence.load(std::memory_order_relaxed) + 1U;
+    control->stateSequence.store(sequence, std::memory_order_release);
+    impl_->signalRequest();
+
+    if (!impl_->awaitState(sequence)) {
+        ++impl_->counters.stateTimeouts;
+        return PluginStateStatus::timedOut;
+    }
+    if (control->stateResult.load(std::memory_order_acquire)
+        != kStateResultOk) {
+        ++impl_->counters.stateRejections;
+        return PluginStateStatus::rejectedByPlugin;
+    }
+    ++impl_->counters.stateRestores;
+    return PluginStateStatus::ok;
+}
+
+PluginStateStatus PluginBridge::captureState(
+    std::vector<std::byte>& state
+) {
+    state.clear();
+    if (!impl_->started
+        || impl_->control == nullptr
+        || impl_->config.maximumStateBytes == 0U) {
+        return PluginStateStatus::unavailable;
+    }
+
+    auto* const control = impl_->control;
+    control->stateBytes.store(0U, std::memory_order_relaxed);
+    control->stateRequest.store(
+        kStateRequestCapture,
+        std::memory_order_relaxed
+    );
+    const auto sequence =
+        control->stateSequence.load(std::memory_order_relaxed) + 1U;
+    control->stateSequence.store(sequence, std::memory_order_release);
+    impl_->signalRequest();
+
+    if (!impl_->awaitState(sequence)) {
+        ++impl_->counters.stateTimeouts;
+        return PluginStateStatus::timedOut;
+    }
+    if (control->stateResult.load(std::memory_order_acquire)
+        != kStateResultOk) {
+        ++impl_->counters.stateRejections;
+        return PluginStateStatus::rejectedByPlugin;
+    }
+
+    const auto produced = std::min(
+        static_cast<std::size_t>(
+            control->stateBytes.load(std::memory_order_acquire)
+        ),
+        static_cast<std::size_t>(impl_->config.maximumStateBytes)
+    );
+    try {
+        state.resize(produced);
+    } catch (const std::bad_alloc&) {
+        return PluginStateStatus::unavailable;
+    }
+    if (produced != 0U) {
+        std::memcpy(
+            state.data(),
+            stateBase(control, impl_->sampleCount()),
+            produced
+        );
+    }
+    ++impl_->counters.stateCaptures;
+    return PluginStateStatus::ok;
+}
+
 PluginBlockStatus PluginBridge::processBlock(
     const std::span<const float> interleavedInput,
     const std::span<float> interleavedOutput,
@@ -582,7 +821,8 @@ int PluginBridge::runChild(
     }
     bytes = regionBytes(
         header->maximumFrames.load(std::memory_order_relaxed),
-        header->channelCount.load(std::memory_order_relaxed)
+        header->channelCount.load(std::memory_order_relaxed),
+        header->maximumStateBytes.load(std::memory_order_relaxed)
     );
     UnmapViewOfFile(header);
     control = static_cast<SharedControl*>(
@@ -632,7 +872,8 @@ int PluginBridge::runChild(
     }
     bytes = regionBytes(
         header->maximumFrames.load(std::memory_order_relaxed),
-        header->channelCount.load(std::memory_order_relaxed)
+        header->channelCount.load(std::memory_order_relaxed),
+        header->maximumStateBytes.load(std::memory_order_relaxed)
     );
     ::munmap(header, sizeof(SharedControl));
     void* const mapped = ::mmap(
@@ -662,6 +903,14 @@ int PluginBridge::runChild(
         control->channelCount.load(std::memory_order_relaxed);
     const auto capacity = static_cast<std::size_t>(maximumFrames)
         * static_cast<std::size_t>(channelCount);
+    const auto stateCapacity = static_cast<std::size_t>(
+        control->maximumStateBytes.load(std::memory_order_relaxed)
+    );
+
+    // Live state of the stand-in plugin. The default stands in for a
+    // freshly instantiated plugin that has never been given a blob.
+    float gain = 0.5F;
+    std::vector<std::byte> payload;
 
     control->childReady.store(1U, std::memory_order_release);
 
@@ -700,6 +949,7 @@ int PluginBridge::runChild(
 
     std::uint32_t handled = 0U;
     std::uint32_t lastSequence = 0U;
+    std::uint32_t lastStateSequence = 0U;
     while (control->shutdown.load(std::memory_order_acquire) == 0U) {
         // Block rather than poll. A polling child costs a core, and on a
         // two-core machine that is the core the host is spinning on: an
@@ -714,6 +964,71 @@ int PluginBridge::runChild(
         if (control->shutdown.load(std::memory_order_acquire) != 0U) {
             break;
         }
+
+        // State work is serviced in the same loop as audio, which is
+        // exactly what guarantees a blob is applied between blocks and
+        // never during one.
+        const auto stateSequence =
+            control->stateSequence.load(std::memory_order_acquire);
+        if (stateSequence != lastStateSequence && stateCapacity != 0U) {
+            lastStateSequence = stateSequence;
+            std::byte* const blob = stateBase(control, capacity);
+            const auto request =
+                control->stateRequest.load(std::memory_order_relaxed);
+            if (request == kStateRequestRestore) {
+                const auto length = std::min(
+                    static_cast<std::size_t>(
+                        control->stateBytes.load(std::memory_order_relaxed)
+                    ),
+                    stateCapacity
+                );
+                float restored = 0.0F;
+                const std::span<const std::byte> incoming {blob, length};
+                if (stub::decodeStateGain(incoming, restored)
+                    && restored >= 0.0F
+                    && restored <= 4.0F) {
+                    gain = restored;
+                    payload.assign(
+                        incoming.begin() + 12,
+                        incoming.end() - 4
+                    );
+                    control->stateResult.store(
+                        kStateResultOk,
+                        std::memory_order_relaxed
+                    );
+                } else {
+                    // A refused blob leaves the previous state in force.
+                    // Half-applying it would be worse than not loading it.
+                    control->stateResult.store(
+                        kStateResultRejected,
+                        std::memory_order_relaxed
+                    );
+                }
+            } else if (request == kStateRequestCapture) {
+                const auto produced = stub::encodeState(gain, payload);
+                if (produced.size() <= stateCapacity) {
+                    std::memcpy(blob, produced.data(), produced.size());
+                    control->stateBytes.store(
+                        static_cast<std::uint32_t>(produced.size()),
+                        std::memory_order_relaxed
+                    );
+                    control->stateResult.store(
+                        kStateResultOk,
+                        std::memory_order_relaxed
+                    );
+                } else {
+                    control->stateResult.store(
+                        kStateResultRejected,
+                        std::memory_order_relaxed
+                    );
+                }
+            }
+            control->stateCompletion.store(
+                stateSequence,
+                std::memory_order_release
+            );
+        }
+
         const auto sequence =
             control->requestSequence.load(std::memory_order_acquire);
         if (sequence == lastSequence) {
@@ -751,8 +1066,10 @@ int PluginBridge::runChild(
         for (std::size_t index = 0U; index < samples; ++index) {
             // Stand-in for plugin DSP: a deterministic, verifiable
             // transform so a test can prove the audio round-tripped
-            // through the other process rather than being zeroed.
-            destination[index] = source[index] * 0.5F;
+            // through the other process rather than being zeroed. The
+            // coefficient comes from restored state, so the same assertion
+            // also proves a restored blob reached the DSP.
+            destination[index] = source[index] * gain;
         }
         ++handled;
         control->completionSequence.store(
