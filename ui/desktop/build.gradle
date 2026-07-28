@@ -6,21 +6,32 @@ def skikoVersion = "0.150.1"
 def kotlinStdlibVersion = "2.3.20"
 def osName = System.getProperty("os.name").toLowerCase(Locale.ROOT)
 def architecture = System.getProperty("os.arch").toLowerCase(Locale.ROOT)
+def supportedSkikoTargets = [
+    "windows-x64",
+    "macos-arm64",
+    "macos-x64",
+    "linux-arm64",
+    "linux-x64",
+] as Set
 
-def skikoTarget
+def detectedSkikoTarget
 if (osName.contains("win") && architecture.contains("64")) {
-    skikoTarget = "windows-x64"
+    detectedSkikoTarget = "windows-x64"
 } else if (osName.contains("mac") && architecture.contains("aarch64")) {
-    skikoTarget = "macos-arm64"
+    detectedSkikoTarget = "macos-arm64"
 } else if (osName.contains("mac") && architecture.contains("64")) {
-    skikoTarget = "macos-x64"
+    detectedSkikoTarget = "macos-x64"
 } else if (osName.contains("linux") && architecture.contains("aarch64")) {
-    skikoTarget = "linux-arm64"
+    detectedSkikoTarget = "linux-arm64"
 } else if (osName.contains("linux") && architecture.contains("64")) {
-    skikoTarget = "linux-x64"
-} else {
+    detectedSkikoTarget = "linux-x64"
+}
+def skikoTarget = providers.gradleProperty("iramixSkikoTarget")
+    .getOrNull() ?: detectedSkikoTarget
+if (!supportedSkikoTargets.contains(skikoTarget)) {
     throw new GradleException(
-        "Unsupported desktop target: ${osName}/${architecture}"
+        "Unsupported desktop target: ${skikoTarget}; "
+            + "host=${osName}/${architecture}"
     )
 }
 
@@ -53,7 +64,7 @@ tasks.register("architectureSmoke", JavaExec) {
     classpath = sourceSets.main.runtimeClasspath
     mainClass = "com.iramix.ui.tools.ArchitectureSmoke"
     providers.gradleProperty("iramixEngineProbe").getOrNull()?.with {
-        environment "IRAMIX_ENGINE_PROBE", it
+        environment "IRAMIX_ENGINE_PROBE", rootProject.file(it).absolutePath
     }
 }
 
@@ -63,7 +74,7 @@ tasks.register("ipcLoadTest", JavaExec) {
     classpath = sourceSets.main.runtimeClasspath
     mainClass = "com.iramix.ui.tools.IpcLoadTest"
     providers.gradleProperty("iramixEngineProbe").getOrNull()?.with {
-        environment "IRAMIX_ENGINE_PROBE", it
+        environment "IRAMIX_ENGINE_PROBE", rootProject.file(it).absolutePath
     }
 }
 
@@ -77,4 +88,5 @@ tasks.named("check") {
 
 dependencyLocking {
     lockAllConfigurations()
+    lockFile = file("gradle-${skikoTarget}.lockfile")
 }

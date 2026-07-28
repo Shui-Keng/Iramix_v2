@@ -1,0 +1,14 @@
+# This is a Gradle generated file for dependency locking.
+# Manual edits can break the build and are not advised.
+# This file is expected to be part of source control.
+# To regenerate this file, run: ./gradlew :ui:desktop:dependencies --write-locks
+org.jetbrains.kotlin:kotlin-stdlib:2.3.20=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
+org.jetbrains.kotlinx:kotlinx-coroutines-bom:1.8.0=runtimeClasspath,testRuntimeClasspath
+org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.8.0=runtimeClasspath,testRuntimeClasspath
+org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.0=runtimeClasspath,testRuntimeClasspath
+org.jetbrains.runtime:jbr-api:1.5.0=runtimeClasspath,testRuntimeClasspath
+org.jetbrains.skiko:skiko-awt-runtime-linux-arm64:0.150.1=runtimeClasspath,testRuntimeClasspath
+org.jetbrains.skiko:skiko-awt:0.150.1=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
+org.jetbrains:annotations:13.0=compileClasspath,testCompileClasspath
+org.jetbrains:annotations:23.0.0=runtimeClasspath,testRuntimeClasspath
+empty=annotationProcessor,testAnnotationProcessor

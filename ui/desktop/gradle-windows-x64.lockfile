@@ -1,7 +1,8 @@
 # This is a Gradle generated file for dependency locking.
 # Manual edits can break the build and are not advised.
 # This file is expected to be part of source control.
-# To regenerate this file, run: ./gradlew :ui:desktop:dependencies --write-locks
+# To regenerate this file, run:
+# gradle :ui:desktop:dependencies --write-locks -PiramixSkikoTarget=windows-x64
 org.jetbrains.kotlin:kotlin-stdlib:2.3.20=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
 org.jetbrains.kotlinx:kotlinx-coroutines-bom:1.8.0=runtimeClasspath,testRuntimeClasspath
 org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.8.0=runtimeClasspath,testRuntimeClasspath
