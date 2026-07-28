@@ -172,6 +172,24 @@ When extending `SessionDocument`:
   the line does. Most existing comments mark a safety property; match that
   bar or omit the comment.
 
+### Portability
+
+The local toolchain is GCC/MinGW (MSYS2 UCRT64); CI additionally builds
+MSVC, AppleClang, and Linux GCC. **A green local build proves very little
+about portability** — this has already bitten twice:
+
+- `std::uintmax_t` is `unsigned long` on libc++ but `unsigned long long`
+  here, so `std::min(fileSize, someUint64)` compiled on Windows and Linux
+  and failed to deduce on macOS. Convert explicitly.
+- Windows SDK headers are order-sensitive and MinGW is far more forgiving
+  than MSVC. `windows.h` comes first, not alphabetically.
+
+When a construct's portability cannot be verified from this machine,
+prefer the form that does not depend on the unverifiable assumption.
+`WasapiProbe.cpp` defines `PKEY_Device_FriendlyName` locally rather than
+relying on both a header include order *and* whichever import library a
+toolchain happens to supply the symbol from.
+
 ## Tests
 
 There is **no test framework**. Each `tests/*.cpp` is a `main()` that calls

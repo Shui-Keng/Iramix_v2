@@ -128,6 +128,34 @@ measurement semantics and belongs to **P0-008**, not to session
 restoration. Fixing it hastily here would risk publishing latency figures
 whose meaning had quietly changed.
 
+## CI and sanitizer results
+
+GitHub Actions:
+[`30359826999`](https://github.com/Shui-Keng/Iramix_v2/actions/runs/30359826999)
+
+All five jobs passed. Getting there took one more Windows-only fix, worth
+recording because it is a second instance of the same class of problem as
+the macOS `uintmax_t` failure: **a construct that compiles on the one
+toolchain available locally and not on the one CI uses.**
+
+`functiondiscoverykeys_devpkey.h` sat before `windows.h` and
+`mmdeviceapi.h` in alphabetical include order. It uses
+`DEFINE_PROPERTYKEY` without defining it, so MSVC failed where MinGW
+tolerated the ordering.
+
+Reordering the includes would have fixed the compile error, but reading
+the SDK headers on this machine — which happens to have the same
+10.0.26100.0 SDK the CI job uses — showed a second problem behind it:
+without `INITGUID` the macro only *declares* the key, leaving the symbol
+to whichever import library a toolchain supplies. Whether MSVC's default
+libraries provide it could not be checked from here, so reordering risked
+moving the failure from compile time to link time.
+
+`PKEY_Device_FriendlyName` is therefore defined locally from the published
+SDK value, which removes both toolchain-dependent assumptions rather than
+one. Confirmed on CI: MSVC compiles and links it, and friendly names still
+resolve locally.
+
 ## Evidence boundary
 
 This proves real WASAPI enumeration, that a session's stored device record
