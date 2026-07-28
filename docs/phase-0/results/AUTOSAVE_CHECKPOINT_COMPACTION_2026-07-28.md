@@ -130,6 +130,15 @@ another thread and that latency is not something a test should pretend
 away. `commit_wait_ms` above is that real durable-save latency, not a
 window measurement.
 
+Confirmed on GitHub Actions run
+[`30358009100`](https://github.com/Shui-Keng/Iramix_v2/actions/runs/30358009100):
+all five jobs green. The macOS session suite — the platform that exposed
+the original race — now runs in **0.15 s**, against 0.70–0.79 s under the
+500 ms wall-clock window and a failure before that. TSan passing matters
+here specifically: the manual clock notifies the service worker across
+threads, so a race in the observer or condition-variable handling would
+surface there rather than as a silent flake.
+
 **No scheduler behavior was changed.** The earlier 30 ms and 500 ms figures
 have been replaced rather than kept, because they were measured against a
 window the test no longer uses.
