@@ -26,6 +26,23 @@ struct PluginBridgeConfig final {
     // may wait far longer than a block. Still bounded: a plugin that will
     // not answer must not stall a save or a project load.
     std::chrono::milliseconds stateDeadline {250};
+    // Depth of the control-to-plugin parameter queue, rounded up to a power
+    // of two. Zero disables parameter transport. Bounded on purpose: a
+    // queue that grows is a queue that allocates, and saturation must be a
+    // counted outcome rather than an unbounded backlog.
+    std::uint32_t parameterQueueCapacity {0U};
+};
+
+// Parameters the stand-in plugin exposes. A real plugin publishes its own
+// list; these exist so the transport can be validated against observable
+// DSP behaviour.
+enum class PluginParameterId : std::uint32_t {
+    // Applied to every sample, and carried in the plugin's state blob.
+    gain = 1U,
+    // Non-zero passes audio through untouched. Deliberately *not* in the
+    // state blob: the session schema keeps bypass as a host-side field on
+    // SessionPlugin, so the plugin must not claim ownership of it.
+    bypass = 2U,
 };
 
 enum class PluginBlockStatus : std::uint32_t {
@@ -66,6 +83,29 @@ struct PluginBridgeCounters final {
     std::uint64_t stateCaptures {0U};
     std::uint64_t stateRejections {0U};
     std::uint64_t stateTimeouts {0U};
+    std::uint64_t parametersSent {0U};
+    // The queue was full. The change was refused at the call site rather
+    // than dropped silently somewhere downstream.
+    std::uint64_t parameterOverflows {0U};
+    // The event was refused because its timestamp went backwards, which
+    // would make the rendered result depend on delivery order.
+    std::uint64_t parameterOutOfOrder {0U};
+    // Reported by the plugin process, not the host.
+    std::uint64_t parametersApplied {0U};
+    // Applied, but only after the block they were scheduled for had
+    // already been rendered.
+    std::uint64_t parametersLate {0U};
+};
+
+enum class PluginParameterStatus : std::uint32_t {
+    accepted = 1U,
+    // The queue is full. The caller decides what to do; the bridge does
+    // not silently drop the change.
+    queueFull = 2U,
+    // The timestamp is earlier than one already queued.
+    outOfOrder = 3U,
+    // Not started, stopped, or configured without a parameter queue.
+    unavailable = 4U,
 };
 
 // Runs plugin audio in a separate process over shared memory.
@@ -103,6 +143,23 @@ public:
         std::span<float> interleavedOutput,
         std::uint32_t frameCount
     ) noexcept;
+
+    // Queues one parameter change for the plugin, to take effect at
+    // `sampleTime`. Lock-free and allocation-free, so it is safe from the
+    // control thread while audio is running; timestamps must not go
+    // backwards, because a rendered result that depends on delivery order
+    // is not reproducible.
+    [[nodiscard]] PluginParameterStatus setParameter(
+        PluginParameterId parameter,
+        float value,
+        std::uint64_t sampleTime
+    ) noexcept;
+
+    // Sample position of the next block. The bridge advances this by
+    // frameCount on every processBlock() call, degraded ones included —
+    // transport does not stop because a plugin missed its deadline. A real
+    // integration would take this from the transport instead.
+    [[nodiscard]] std::uint64_t samplePosition() const noexcept;
 
     // Hands a session's stored state blob to the live plugin. Control
     // thread only: it allocates nothing but it does wait, so calling it

@@ -111,7 +111,10 @@ Exit evidence:
 
 ## Week 7: Plugin isolation
 
-- Scan a minimal CLAP and VST3 set out of process.
+- Scan a minimal CLAP and VST3 set out of process. **Blocked, not
+  deferred:** VST3 carries the same dual GPLv3/proprietary shape as ASIO
+  (see `DEPENDENCIES.md`), so scanning cannot start until that licence is
+  chosen. This is a decision, not an engineering task.
 - Prototype shared-memory audio/control transport.
 - Terminate the plugin process during playback.
 - Identify native editor embedding constraints on each OS.
@@ -161,7 +164,7 @@ stand-in, not a real CLAP or VST3.
 | P0-010 | Dependency/license inventory | Inventory separates in-build from candidates, Java licenses read from cached POMs and regenerable via `scripts/license-inventory.ps1`; C++ engine confirmed dependency-free. Four obligations open: Skiko native attribution (L-1), unverified JACK license (L-2), mutable CI action tags (L-3), annotations version skew (L-4); vulnerability inventory still unautomated |
 | P0-011 | Immutable real-time graph core | Windows production path, 5,001-publication sanitizer edit-storm, cross-block ramps, sample-rate modulation, and denormal protection verified; other backends and final soak pending |
 | P0-012 | Disk and session resilience | Native session ownership, write-ahead journal, monotonic undo/redo, replay, immutable/coalesced saves, fixed-window autosave, shutdown flush, revision-gated history compaction, revisioned backup rotation/retention, fail-closed automatic restore, and durable journal baselines verified locally and on three-OS CI/Java/sanitizers; and schema v4 media references, MIDI, device configuration, and plugin state verified locally and on three-OS CI/Java/sanitizers; media relink/restoration verified locally and on three-OS CI/sanitizers; device-configuration restoration decided and verified locally and on three-OS CI/sanitizers, with real WASAPI enumeration selecting a session's stored endpoint on Windows hardware and the audio callback measured on it at zero target/deadline misses (macOS/Linux enumeration absent); plugin state restoration moved to P0-013; macOS/Linux reference-hardware benchmarks accepted as out of scope for Phase 0 (R-13) |
-| P0-013 | Plugin process isolation | Bridge slice done: shared-memory transport, bounded deadline degrading to silence, host survives child crash and hang, bridge overhead p99 19.1 us, orphan watchdog verified. State slice done: a session's stored blob restores into the live plugin and is observable in rendered audio, capture round trips byte for byte through persistence, six refusal paths verified, and a capture from a crashed plugin times out at its deadline instead of stalling a save. No plugin SDK involved. Scanning, editor embedding, control transport, and wiring capture into autosave still pending |
+| P0-013 | Plugin process isolation | Bridge slice done: shared-memory transport, bounded deadline degrading to silence, host survives child crash and hang, bridge overhead p99 19.1 us, orphan watchdog verified. State slice done: a session's stored blob restores into the live plugin and is observable in rendered audio, capture round trips byte for byte through persistence, six refusal paths verified, and a capture from a crashed plugin times out at its deadline instead of stalling a save. No plugin SDK involved. Control transport slice done: bounded lock-free SPSC parameter ring, events applied at their scheduled block and never early, saturation/lateness/reordering counted rather than dropped, and a transport change observable in both rendered audio and captured state. No plugin SDK involved. Scanning is blocked on the VST3 licence decision, not on engineering; editor embedding and wiring capture into autosave still pending |
 | P0-014 | Phase 0 exit review and Phase 1 backlog | Not started |
 
 ## Definition of done
