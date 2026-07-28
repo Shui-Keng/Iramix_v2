@@ -1,5 +1,5 @@
 #include "iramix/ipc/Protocol.hpp"
-#include "iramix/persistence/SessionSaveCoordinator.hpp"
+#include "iramix/persistence/SessionPersistenceService.hpp"
 #include "iramix/platform/Platform.hpp"
 #include "iramix/session/JournaledSession.hpp"
 #include "iramix/session/SessionController.hpp"
@@ -152,7 +152,10 @@ bool configureBinaryStandardStreams() {
     return payload;
 }
 
-int runIpcSession(const std::filesystem::path& projectTarget) {
+int runIpcSession(
+    const std::filesystem::path& projectTarget,
+    const std::chrono::milliseconds autosaveInterval
+) {
     using iramix::ipc::Message;
     using iramix::ipc::MessageType;
 
@@ -160,8 +163,8 @@ int runIpcSession(const std::filesystem::path& projectTarget) {
     std::unique_ptr<iramix::session::JournaledSession>
         journaledSession;
     std::unique_ptr<
-        iramix::persistence::SessionSaveCoordinator
-    > saveCoordinator;
+        iramix::persistence::SessionPersistenceService
+    > persistenceService;
     std::string setupError;
     if (!projectTarget.empty()) {
         journaledSession =
@@ -175,13 +178,15 @@ int runIpcSession(const std::filesystem::path& projectTarget) {
                 << setupError << '\n';
             return 5;
         }
-        saveCoordinator =
-            iramix::persistence::SessionSaveCoordinator::create(
-            projectTarget,
-            setupError
-        );
-        if (saveCoordinator == nullptr
-            || !saveCoordinator->start(setupError)) {
+        persistenceService =
+            iramix::persistence::SessionPersistenceService::create(
+                projectTarget,
+                autosaveInterval,
+                setupError,
+                journaledSession->snapshotRevision()
+            );
+        if (persistenceService == nullptr
+            || !persistenceService->start(setupError)) {
             std::cerr
                 << "Session save worker setup failed: "
                 << setupError << '\n';
@@ -203,6 +208,53 @@ int runIpcSession(const std::filesystem::path& projectTarget) {
             ? journaledSession->snapshot()
             : ephemeralSession.snapshot();
     };
+    const auto trackAutosave = [&]() {
+        if (persistenceService == nullptr
+            || journaledSession == nullptr) {
+            return std::string {};
+        }
+        try {
+            const auto status = persistenceService->markDirty(
+                journaledSession->snapshot()
+            );
+            if (status
+                    == iramix::persistence::
+                        AutosaveDirtyStatus::invalidRevision
+                || status
+                    == iramix::persistence::
+                        AutosaveDirtyStatus::stopped) {
+                return std::string {
+                    ";autosave_tracking=deferred"
+                };
+            }
+            return std::string {};
+        } catch (const std::bad_alloc&) {
+            return std::string {
+                ";autosave_tracking=allocation_failure"
+            };
+        }
+    };
+    const auto checkpointDurable = [&]() {
+        if (persistenceService == nullptr
+            || journaledSession == nullptr) {
+            return;
+        }
+        const auto durable =
+            persistenceService->durableRevision();
+        if (durable == journaledSession->currentRevision()
+            && durable
+                != journaledSession->checkpointRevision()) {
+            std::string checkpointError;
+            if (!journaledSession->checkpoint(
+                    durable,
+                    checkpointError
+                )) {
+                std::cerr
+                    << "Session checkpoint deferred: "
+                    << checkpointError << '\n';
+            }
+        }
+    };
 
     bool welcomed = false;
     while (true) {
@@ -210,6 +262,10 @@ int runIpcSession(const std::filesystem::path& projectTarget) {
         std::string error;
         if (!iramix::ipc::readMessage(std::cin, request, error)) {
             if (error == "end of stream") {
+                if (persistenceService != nullptr) {
+                    persistenceService->stop();
+                    checkpointDurable();
+                }
                 return 0;
             }
             std::cerr << "IPC read failed: " << error << '\n';
@@ -239,9 +295,9 @@ int runIpcSession(const std::filesystem::path& projectTarget) {
                     }
                     + ";capabilities=ping,shutdown,"
                       "session_state,set_tempo"
-                    + (saveCoordinator != nullptr
+                    + (persistenceService != nullptr
                         ? ",save_session,poll_save_completion,"
-                          "undo,redo"
+                          "undo,redo,autosave,checkpoint"
                         : "");
             }
         } else if (request.type == MessageType::ping) {
@@ -260,6 +316,23 @@ int runIpcSession(const std::filesystem::path& projectTarget) {
                     + ";redo_depth="
                     + std::to_string(
                         journaledSession->redoDepth()
+                    );
+                response.payload += ";durable_revision="
+                    + std::to_string(
+                        persistenceService->durableRevision()
+                    )
+                    + ";dirty_revision="
+                    + std::to_string(
+                        persistenceService->dirtyRevision()
+                    )
+                    + ";autosave_requests="
+                    + std::to_string(
+                        persistenceService->
+                            autosaveRequestCount()
+                    )
+                    + ";checkpoint_revision="
+                    + std::to_string(
+                        journaledSession->checkpointRevision()
                     );
             }
         } else if (request.type == MessageType::setTempo) {
@@ -284,7 +357,8 @@ int runIpcSession(const std::filesystem::path& projectTarget) {
                         response.type =
                             MessageType::acknowledgement;
                         response.payload = "revision="
-                            + std::to_string(result.revision);
+                            + std::to_string(result.revision)
+                            + trackAutosave();
                     } else {
                         response.payload = journaledEditFailure(
                             result,
@@ -335,7 +409,8 @@ int runIpcSession(const std::filesystem::path& projectTarget) {
                 if (result.applied()) {
                     response.type = MessageType::acknowledgement;
                     response.payload = "revision="
-                        + std::to_string(result.revision);
+                        + std::to_string(result.revision)
+                        + trackAutosave();
                 } else {
                     response.payload = journaledEditFailure(
                         result,
@@ -345,7 +420,7 @@ int runIpcSession(const std::filesystem::path& projectTarget) {
             }
         } else if (request.type == MessageType::saveSession) {
             std::uint64_t revision = 0U;
-            if (saveCoordinator == nullptr) {
+            if (persistenceService == nullptr) {
                 response.payload = "project_target_required";
             } else if (!parseRevision(request.payload, revision)) {
                 response.payload = "invalid_save_revision";
@@ -356,7 +431,7 @@ int runIpcSession(const std::filesystem::path& projectTarget) {
             } else {
                 try {
                     const auto result =
-                        saveCoordinator->requestSave(
+                        persistenceService->requestSave(
                             sessionSnapshot()
                         );
                     if (result
@@ -389,12 +464,13 @@ int runIpcSession(const std::filesystem::path& projectTarget) {
             request.type == MessageType::pollSaveCompletion
         ) {
             std::uint64_t revision = 0U;
-            if (saveCoordinator == nullptr) {
+            if (persistenceService == nullptr) {
                 response.payload = "project_target_required";
             } else if (!parseRevision(request.payload, revision)) {
                 response.payload = "invalid_save_revision";
             } else {
-                const auto query = saveCoordinator->query(revision);
+                const auto query =
+                    persistenceService->query(revision);
                 if (query.status
                     == iramix::persistence::
                         SessionSaveQueryStatus::committed) {
@@ -414,12 +490,14 @@ int runIpcSession(const std::filesystem::path& projectTarget) {
                     response.type = MessageType::acknowledgement;
                     response.payload = "none";
                 } else {
-                    response.payload = "unknown_save_revision";
+                    response.type = MessageType::acknowledgement;
+                    response.payload = "none";
                 }
             }
         } else if (request.type == MessageType::shutdown) {
-            if (saveCoordinator != nullptr) {
-                saveCoordinator->stop();
+            if (persistenceService != nullptr) {
+                persistenceService->stop();
+                checkpointDurable();
             }
             response.type = MessageType::acknowledgement;
             response.payload = "shutdown";
@@ -431,6 +509,7 @@ int runIpcSession(const std::filesystem::path& projectTarget) {
             std::cerr << "IPC write failed: " << error << '\n';
             return 3;
         }
+        checkpointDurable();
         if (
             welcomed
             && request.type == MessageType::shutdown
@@ -458,20 +537,55 @@ int main(const int argc, char* argv[]) {
     }
     if (ipcRequested) {
         std::filesystem::path projectTarget;
-        if (argc == 4
-            && std::string_view {argv[2]} == "--project") {
-            projectTarget = argv[3];
-        } else if (argc != 2) {
+        std::chrono::milliseconds autosaveInterval {5'000};
+        int argument = 2;
+        while (argument < argc) {
+            const std::string_view option {argv[argument]};
+            if (option == "--project" && argument + 1 < argc) {
+                projectTarget = argv[argument + 1];
+                argument += 2;
+            } else if (
+                option == "--autosave-interval-ms"
+                && argument + 1 < argc
+            ) {
+                std::uint64_t milliseconds = 0U;
+                const std::string_view value {argv[argument + 1]};
+                const auto parsed = std::from_chars(
+                    value.data(),
+                    value.data() + value.size(),
+                    milliseconds
+                );
+                if (parsed.ec != std::errc {}
+                    || parsed.ptr != value.data() + value.size()
+                    || milliseconds == 0U
+                    || milliseconds > 5'000U) {
+                    std::cerr
+                        << "Invalid autosave interval.\n";
+                    return 1;
+                }
+                autosaveInterval =
+                    std::chrono::milliseconds {milliseconds};
+                argument += 2;
+            } else {
+                std::cerr
+                    << "Usage: iramix_engine_probe --ipc-stdio "
+                       "[--project <path>] "
+                       "[--autosave-interval-ms <1..5000>]\n";
+                return 1;
+            }
+        }
+        if (projectTarget.empty() && argc != 2) {
             std::cerr
                 << "Usage: iramix_engine_probe --ipc-stdio "
-                   "[--project <path>]\n";
+                   "[--project <path>] "
+                   "[--autosave-interval-ms <1..5000>]\n";
             return 1;
         }
         if (!configureBinaryStandardStreams()) {
             std::cerr << "Failed to configure binary IPC streams.\n";
             return 4;
         }
-        return runIpcSession(projectTarget);
+        return runIpcSession(projectTarget, autosaveInterval);
     }
 
     std::cout

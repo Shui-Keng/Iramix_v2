@@ -85,6 +85,13 @@ reopen, the latest project snapshot is loaded first, later journal commands
 are replayed, and the complete retained journal rebuilds undo/redo history.
 An ambiguous append failure poisons the live edit path until reopen.
 
+Project-backed sessions now hand immutable dirty snapshots to a dedicated
+`SessionPersistenceService`. The first dirty revision starts a fixed autosave
+window (five seconds by default); later edits replace the pending snapshot but
+do not indefinitely reset that deadline. The service owns save-coordinator
+polling off the IPC thread, coalesces toward the newest revision, and flushes
+the latest dirty snapshot during orderly shutdown.
+
 ### DSP worker pool
 
 - Executes only independent graph partitions.
@@ -191,6 +198,13 @@ pipeline slot is retained until the control thread consumes its completion.
 The worker publishes `committed` only after serialization, durable staging,
 and atomic replacement succeed.
 
+Journal checkpointing is permitted only when the durable snapshot revision
+exactly equals the live session revision. It atomically rewrites the journal
+through a durably flushed sibling staging file. The compact form preserves the
+active undo stack and reconstructible redo suffix while removing abandoned
+branches and redundant history toggles. If newer edits exist, compaction is
+deferred and the original journal remains authoritative.
+
 The Phase 0 session DTO uses globally unique stable entity IDs and an
 independently versioned binary schema. Schema v3 stores revision, sample rate,
 tempo, tracks, clips, routing, and automation. References are validated on
@@ -202,6 +216,6 @@ The Java/C++ Phase 0 probe now exercises revisioned journaled edits, undo/redo,
 save acceptance, durable completion, process reopen, history reconstruction,
 and a post-recovery save. A coordinator retains one accepted save and
 coalesces later unaccepted requests to the latest immutable revision. Complete
-DAW session coverage, autosave scheduling, journal compaction, final media
-conversion, cold-cache/reference-hardware timing, and media/plugin restoration
-remain pending.
+DAW session coverage, backup rotation, final media conversion,
+cold-cache/reference-hardware timing, and media/plugin restoration remain
+pending.

@@ -496,6 +496,77 @@ JournalRecoveryResult recoverCommandJournal(
     return result;
 }
 
+bool rewriteCommandJournal(
+    const std::filesystem::path& path,
+    const std::span<const JournalCommand> commands,
+    std::string& error
+) {
+    error.clear();
+    std::uint64_t previousSequence = 0U;
+    for (const auto& command : commands) {
+        if (command.sequence == 0U
+            || command.sequence <= previousSequence) {
+            error =
+                "compacted journal sequences must strictly increase";
+            return false;
+        }
+        if (command.payload.size()
+            > std::numeric_limits<std::uint32_t>::max()) {
+            error = "compacted journal payload exceeds format limit";
+            return false;
+        }
+        previousSequence = command.sequence;
+    }
+    if (!ensureParentDirectory(path, error)) {
+        return false;
+    }
+
+    auto staging = path;
+    staging += ".compacting";
+    auto* const file = openFile(staging, L"wb", "wb");
+    if (file == nullptr) {
+        error = "cannot open compacted journal staging file: "
+            + systemError(errno);
+        return false;
+    }
+
+    bool written = true;
+    for (const auto& command : commands) {
+        std::vector<std::byte> record;
+        record.reserve(kJournalHeaderSize + command.payload.size());
+        record.insert(
+            record.end(),
+            kJournalMagic.begin(),
+            kJournalMagic.end()
+        );
+        appendU32(record, kFormatVersion);
+        appendU64(record, command.sequence);
+        appendU32(
+            record,
+            static_cast<std::uint32_t>(command.payload.size())
+        );
+        appendU32(record, crc32(command.payload));
+        record.insert(
+            record.end(),
+            command.payload.begin(),
+            command.payload.end()
+        );
+        if (!writeAll(file, record.data(), record.size(), error)) {
+            written = false;
+            break;
+        }
+    }
+    const bool flushed = written && durableFlush(file, error);
+    const int closeResult = std::fclose(file);
+    if (!flushed || closeResult != 0) {
+        if (error.empty()) {
+            error = "cannot close compacted journal staging file";
+        }
+        return false;
+    }
+    return atomicReplace(staging, path, error);
+}
+
 CommandJournal::CommandJournal(std::filesystem::path path)
     : path_ {std::move(path)} {}
 

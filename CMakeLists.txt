@@ -45,6 +45,7 @@ add_library(iramix_core STATIC
     src/persistence/DiskAudioWorkers.cpp
     src/persistence/Persistence.cpp
     src/persistence/SessionDocument.cpp
+    src/persistence/SessionPersistenceService.cpp
     src/persistence/SessionSaveCoordinator.cpp
     src/realtime/Audit.cpp
     src/session/JournaledSession.cpp

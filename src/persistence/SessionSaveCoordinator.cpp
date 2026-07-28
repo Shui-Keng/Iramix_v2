@@ -1,5 +1,6 @@
 #include "iramix/persistence/SessionSaveCoordinator.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <new>
 #include <thread>
@@ -8,9 +9,11 @@
 namespace iramix::persistence {
 
 SessionSaveCoordinator::SessionSaveCoordinator(
-    std::unique_ptr<AsyncSessionSaver> saver
+    std::unique_ptr<AsyncSessionSaver> saver,
+    const std::uint64_t initialDurableRevision
 )
-    : saver_ {std::move(saver)} {}
+    : saver_ {std::move(saver)},
+      durableRevision_ {initialDurableRevision} {}
 
 SessionSaveCoordinator::~SessionSaveCoordinator() {
     stop();
@@ -19,7 +22,8 @@ SessionSaveCoordinator::~SessionSaveCoordinator() {
 std::unique_ptr<SessionSaveCoordinator>
 SessionSaveCoordinator::create(
     std::filesystem::path target,
-    std::string& error
+    std::string& error,
+    const std::uint64_t initialDurableRevision
 ) {
     auto saver = AsyncSessionSaver::create(
         std::move(target),
@@ -31,7 +35,10 @@ SessionSaveCoordinator::create(
     }
     try {
         return std::unique_ptr<SessionSaveCoordinator> {
-            new SessionSaveCoordinator {std::move(saver)}
+            new SessionSaveCoordinator {
+                std::move(saver),
+                initialDurableRevision,
+            }
         };
     } catch (const std::bad_alloc&) {
         error = "cannot allocate session save coordinator";
@@ -106,7 +113,8 @@ SessionSaveRequestStatus SessionSaveCoordinator::requestSave(
 
     pump();
     const auto revision = snapshot->revision;
-    if (revision < requestedRevision_) {
+    if (revision < requestedRevision_
+        || revision < durableRevision_) {
         return SessionSaveRequestStatus::invalidRevision;
     }
     if (revision == requestedRevision_) {
@@ -210,7 +218,10 @@ void SessionSaveCoordinator::applyCompletion(
     latestCompletion_ = completion;
     inFlightRevision_ = 0U;
     if (completion.status == ProjectSaveCompletionStatus::committed) {
-        durableRevision_ = completion.revision;
+        durableRevision_ = std::max(
+            durableRevision_,
+            completion.revision
+        );
         failedRevision_ = 0U;
     } else {
         failedRevision_ = completion.revision;

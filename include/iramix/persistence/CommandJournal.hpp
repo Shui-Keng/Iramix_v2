@@ -29,6 +29,14 @@ struct JournalRecoveryResult final {
     const std::filesystem::path& path
 );
 
+// Atomically replaces a journal with a validated compact representation.
+// Existing content remains authoritative unless the replacement commits.
+[[nodiscard]] bool rewriteCommandJournal(
+    const std::filesystem::path& path,
+    std::span<const JournalCommand> commands,
+    std::string& error
+);
+
 class CommandJournal final {
 public:
     explicit CommandJournal(std::filesystem::path path);

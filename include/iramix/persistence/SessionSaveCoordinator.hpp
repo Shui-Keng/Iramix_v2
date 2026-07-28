@@ -46,7 +46,8 @@ public:
 
     [[nodiscard]] static std::unique_ptr<SessionSaveCoordinator> create(
         std::filesystem::path target,
-        std::string& error
+        std::string& error,
+        std::uint64_t initialDurableRevision = 0U
     );
 
     [[nodiscard]] bool start(std::string& error);
@@ -79,7 +80,8 @@ private:
     };
 
     explicit SessionSaveCoordinator(
-        std::unique_ptr<AsyncSessionSaver> saver
+        std::unique_ptr<AsyncSessionSaver> saver,
+        std::uint64_t initialDurableRevision
     );
 
     void submitPending() noexcept;

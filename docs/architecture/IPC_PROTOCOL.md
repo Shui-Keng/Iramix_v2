@@ -71,7 +71,7 @@ Version 1 message type values:
 The executable mode `iramix_engine_probe --ipc-stdio` validates
 `HELLO/WELCOME`, sequenced `PING/ACK`, and clean `SHUTDOWN/ACK`. When launched
 with `--project <path>`, it also advertises `save_session` and
-`poll_save_completion`, `undo`, and `redo`.
+`poll_save_completion`, `undo`, `redo`, `autosave`, and `checkpoint`.
 
 `SAVE_SESSION` returns an immediate ACK only after the immutable snapshot is
 accepted by the bounded native pipeline. It does not claim durability.
@@ -88,6 +88,10 @@ The exchange guard is a `ReentrantLock`, not a Java `synchronized` monitor:
 blocking pipe reads while holding a monitor can pin a Java 21 virtual thread
 and starve the reader task. The lock is released between durability polls.
 
+An unknown revision returns `none` from `POLL_SAVE_COMPLETION` because a timed
+autosave may not yet have reached its fixed deadline. This lets the UI wait for
+autosave without first issuing `SAVE_SESSION`.
+
 `SESSION_STATE` returns the current native revision and compact state summary.
 `SET_TEMPO` carries `expected_revision`; the engine either applies it and
 returns the resulting revision or rejects it with the current revision. Save
@@ -102,6 +106,13 @@ it applies the stored inverse as a new command. Reopen loads the committed
 snapshot, replays any later commands, and reconstructs retained history before
 WELCOME. An append error rejects the operation and requires process reopen
 before another persistent edit is accepted.
+
+Each successful persistent edit also publishes an immutable dirty snapshot to
+the background autosave service. The default fixed window is five seconds, and
+the probe accepts a shorter `--autosave-interval-ms` only within `1..5000` for
+tests. `SESSION_STATE` exposes durable, dirty, autosave-request, and checkpoint
+revisions. Once the current revision is durably saved, the control thread may
+atomically checkpoint the journal; it never compacts behind a newer live edit.
 
 ## Phase 0 load-test evidence
 

@@ -62,7 +62,10 @@ history reconstruction, and stable-ID redo are covered locally by
 [`JOURNALED_SESSION_UNDO_REDO_2026-07-28.md`](results/JOURNALED_SESSION_UNDO_REDO_2026-07-28.md).
 The production-session and initial journal/undo portions are therefore
 addressed, including hosted three-OS, Java 21, ASan/UBSan, and TSan
-confirmation. R-06 remains open for complete state, autosave and journal
-compaction, cold storage, backup, and physical power-loss evidence. The first
+confirmation. Fixed-window autosave, orderly-shutdown flush, and
+revision-gated history compaction now have local evidence in
+[`AUTOSAVE_CHECKPOINT_COMPACTION_2026-07-28.md`](results/AUTOSAVE_CHECKPOINT_COMPACTION_2026-07-28.md).
+R-06 remains open for hosted confirmation of this slice, complete state, cold
+storage, backup rotation, and physical power-loss evidence. The first
 durable-command latency p99 also missed the provisional 10 ms control target,
 so performance optimization must not be treated as complete.

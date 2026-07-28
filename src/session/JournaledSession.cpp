@@ -278,10 +278,14 @@ void appendCommand(
 
 JournaledSession::JournaledSession(
     std::unique_ptr<SessionController> controller,
-    std::unique_ptr<persistence::CommandJournal> journal
+    std::unique_ptr<persistence::CommandJournal> journal,
+    std::filesystem::path journalPath,
+    const std::uint64_t snapshotRevision
 )
     : controller_ {std::move(controller)},
-      journal_ {std::move(journal)} {}
+      journal_ {std::move(journal)},
+      journalPath_ {std::move(journalPath)},
+      snapshotRevision_ {snapshotRevision} {}
 
 std::filesystem::path JournaledSession::journalPathForProject(
     const std::filesystem::path& projectTarget
@@ -325,11 +329,17 @@ std::unique_ptr<JournaledSession> JournaledSession::open(
         SessionController defaults;
         document = *defaults.snapshot();
     }
-    return createFromDocument(
+    const auto durableSnapshotRevision =
+        snapshotExists ? document.revision : 0U;
+    auto session = createFromDocument(
         std::move(document),
         journalPathForProject(projectTarget),
         error
     );
+    if (session != nullptr) {
+        session->snapshotRevision_ = durableSnapshotRevision;
+    }
+    return session;
 }
 
 std::unique_ptr<JournaledSession>
@@ -353,6 +363,8 @@ JournaledSession::createFromDocument(
                 std::make_unique<persistence::CommandJournal>(
                     journalPath
                 ),
+                journalPath,
+                0U,
             }
         };
         if (!session->replay(journalPath, error)) {
@@ -369,6 +381,10 @@ std::uint64_t JournaledSession::currentRevision() const noexcept {
     return controller_->currentRevision();
 }
 
+std::uint64_t JournaledSession::snapshotRevision() const noexcept {
+    return snapshotRevision_;
+}
+
 std::size_t JournaledSession::trackCount() const noexcept {
     return controller_->trackCount();
 }
@@ -383,6 +399,10 @@ std::size_t JournaledSession::redoDepth() const noexcept {
 
 bool JournaledSession::requiresReopen() const noexcept {
     return requiresReopen_;
+}
+
+std::uint64_t JournaledSession::checkpointRevision() const noexcept {
+    return checkpointRevision_;
 }
 
 persistence::ImmutableSessionSnapshot
@@ -465,6 +485,88 @@ JournaledEditResult JournaledSession::redo(
         HistoryAction::redo,
         error
     );
+}
+
+bool JournaledSession::checkpoint(
+    const std::uint64_t durableRevision,
+    std::string& error
+) {
+    error.clear();
+    if (requiresReopen_) {
+        error = "journal state is ambiguous; reopen required";
+        return false;
+    }
+    if (durableRevision == checkpointRevision_) {
+        return true;
+    }
+    if (durableRevision == 0U
+        || durableRevision != currentRevision()) {
+        error =
+            "checkpoint requires the current revision to be durable";
+        return false;
+    }
+
+    try {
+        std::vector<HistoryEntry> linearHistory;
+        linearHistory.reserve(undo_.size() + redo_.size());
+        linearHistory.insert(
+            linearHistory.end(),
+            undo_.begin(),
+            undo_.end()
+        );
+        for (auto entry = redo_.rbegin(); entry != redo_.rend(); ++entry) {
+            linearHistory.push_back(*entry);
+        }
+
+        const auto recordCount =
+            linearHistory.size() + redo_.size();
+        if (recordCount
+            > static_cast<std::size_t>(durableRevision)) {
+            error = "history cannot fit below checkpoint revision";
+            return false;
+        }
+        std::vector<persistence::JournalCommand> records;
+        records.reserve(recordCount);
+        std::uint64_t sequence =
+            durableRevision - recordCount + 1U;
+        for (const auto& entry : linearHistory) {
+            records.push_back({
+                .sequence = sequence++,
+                .payload = encodeRecord(
+                    static_cast<std::uint32_t>(
+                        HistoryAction::edit
+                    ),
+                    entry.forward,
+                    entry.inverse
+                ),
+            });
+        }
+        for (const auto& entry : redo_) {
+            records.push_back({
+                .sequence = sequence++,
+                .payload = encodeRecord(
+                    static_cast<std::uint32_t>(
+                        HistoryAction::undo
+                    ),
+                    entry.forward,
+                    entry.inverse
+                ),
+            });
+        }
+        if (!persistence::rewriteCommandJournal(
+                journalPath_,
+                records,
+                error
+            )) {
+            return false;
+        }
+        checkpointRevision_ = durableRevision;
+        snapshotRevision_ = durableRevision;
+        return true;
+    } catch (const std::bad_alloc&) {
+        error = "cannot allocate compacted command history";
+        return false;
+    }
 }
 
 JournaledEditResult JournaledSession::commitEdit(

@@ -78,10 +78,12 @@ public:
     JournaledSession& operator=(const JournaledSession&) = delete;
 
     [[nodiscard]] std::uint64_t currentRevision() const noexcept;
+    [[nodiscard]] std::uint64_t snapshotRevision() const noexcept;
     [[nodiscard]] std::size_t trackCount() const noexcept;
     [[nodiscard]] std::size_t undoDepth() const noexcept;
     [[nodiscard]] std::size_t redoDepth() const noexcept;
     [[nodiscard]] bool requiresReopen() const noexcept;
+    [[nodiscard]] std::uint64_t checkpointRevision() const noexcept;
 
     [[nodiscard]] persistence::ImmutableSessionSnapshot snapshot() const;
 
@@ -116,6 +118,13 @@ public:
         std::string& error
     );
 
+    // Safe only after a project snapshot at exactly durableRevision has
+    // committed. Rewrites history atomically without changing live state.
+    [[nodiscard]] bool checkpoint(
+        std::uint64_t durableRevision,
+        std::string& error
+    );
+
 private:
     enum class HistoryAction : std::uint32_t {
         edit = 1U,
@@ -130,7 +139,9 @@ private:
 
     JournaledSession(
         std::unique_ptr<SessionController> controller,
-        std::unique_ptr<persistence::CommandJournal> journal
+        std::unique_ptr<persistence::CommandJournal> journal,
+        std::filesystem::path journalPath,
+        std::uint64_t snapshotRevision
     );
 
     [[nodiscard]] bool replay(
@@ -152,8 +163,11 @@ private:
 
     std::unique_ptr<SessionController> controller_;
     std::unique_ptr<persistence::CommandJournal> journal_;
+    std::filesystem::path journalPath_;
+    std::uint64_t snapshotRevision_ {0U};
     std::vector<HistoryEntry> undo_;
     std::vector<HistoryEntry> redo_;
+    std::uint64_t checkpointRevision_ {0U};
     bool requiresReopen_ {false};
 };
 

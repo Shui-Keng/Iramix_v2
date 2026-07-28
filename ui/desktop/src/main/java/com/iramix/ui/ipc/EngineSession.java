@@ -41,6 +41,14 @@ public final class EngineSession implements AutoCloseable {
         Path executable,
         Path projectTarget
     ) throws IOException {
+        return launch(executable, projectTarget, null);
+    }
+
+    public static EngineSession launch(
+        Path executable,
+        Path projectTarget,
+        Duration autosaveInterval
+    ) throws IOException {
         Objects.requireNonNull(executable, "executable");
         var command = new java.util.ArrayList<String>();
         command.add(executable.toAbsolutePath().toString());
@@ -48,6 +56,16 @@ public final class EngineSession implements AutoCloseable {
         if (projectTarget != null) {
             command.add("--project");
             command.add(projectTarget.toAbsolutePath().toString());
+        }
+        if (autosaveInterval != null) {
+            var intervalMillis = autosaveInterval.toMillis();
+            if (intervalMillis <= 0 || intervalMillis > 5_000) {
+                throw new IllegalArgumentException(
+                    "Autosave interval must be between 1 and 5000 ms."
+                );
+            }
+            command.add("--autosave-interval-ms");
+            command.add(Long.toString(intervalMillis));
         }
         var process = new ProcessBuilder(command)
             .redirectError(ProcessBuilder.Redirect.INHERIT)
@@ -180,6 +198,16 @@ public final class EngineSession implements AutoCloseable {
             },
             Thread::startVirtualThread
         );
+    }
+
+    public SessionSaveResult awaitAutosave(long revision)
+        throws IOException {
+        if (revision <= 0) {
+            throw new IllegalArgumentException(
+                "Session revision must be positive."
+            );
+        }
+        return awaitSessionSave(revision);
     }
 
     private void requestSessionSave(long revision)

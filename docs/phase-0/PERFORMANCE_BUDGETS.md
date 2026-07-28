@@ -182,6 +182,17 @@ explicitly not met by this run. Correctness/recovery tests pass; group commit,
 persistent journal handles, and end-to-end loaded measurement remain follow-up
 work.
 
+The
+[`autosave/checkpoint screening`](results/AUTOSAVE_CHECKPOINT_COMPACTION_2026-07-28.md)
+coalesced three edits behind a 30 ms fixed window and durably saved revision 4
+in `56.9689 ms` from the first dirty mark on the local MSVC Release run. One
+autosave request covered two dirty-snapshot replacements; slower GCC runs
+legitimately used two fixed windows rather than starving the deadline.
+Checkpointing reduced an eight-record, 800-byte journal to two records and 200
+bytes in one raw `4.8606 ms` sample, then reconstructed active undo and redo
+after reopen. These are short synthetic screenings, not reference-storage or
+power-loss evidence.
+
 ## Plugin bridge
 
 - bridge overhead target: below 5% of one core for 100 pass-through instances at

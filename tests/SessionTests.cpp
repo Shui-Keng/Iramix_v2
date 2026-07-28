@@ -1,5 +1,6 @@
 #include "iramix/persistence/ProjectStore.hpp"
 #include "iramix/persistence/SessionDocument.hpp"
+#include "iramix/persistence/SessionPersistenceService.hpp"
 #include "iramix/persistence/SessionSaveCoordinator.hpp"
 #include "iramix/session/JournaledSession.hpp"
 #include "iramix/session/SessionController.hpp"
@@ -433,6 +434,275 @@ void testJournaledEditLatency(const std::filesystem::path& root) {
         << ", max_ms=" << maximum << '\n';
 }
 
+void saveSnapshot(
+    const std::filesystem::path& project,
+    const iramix::persistence::ImmutableSessionSnapshot& snapshot
+) {
+    std::string error;
+    const auto payload =
+        iramix::persistence::serializeSessionDocument(
+            *snapshot,
+            error
+        );
+    require(!payload.empty(), error.c_str());
+    require(
+        iramix::persistence::saveProjectSnapshot(
+            project,
+            payload,
+            error
+        ),
+        error.c_str()
+    );
+}
+
+void testJournalCheckpointCompaction(
+    const std::filesystem::path& root
+) {
+    const auto project = root / "checkpoint-session.irpx";
+    std::string error;
+    auto session =
+        iramix::session::JournaledSession::open(project, error);
+    require(session != nullptr, error.c_str());
+
+    require(session->setTempo(1U, 121.0, error).applied(), "edit A");
+    require(session->setTempo(2U, 122.0, error).applied(), "edit B");
+    require(session->setTempo(3U, 123.0, error).applied(), "edit C");
+    require(session->undo(4U, error).applied(), "undo C");
+    require(session->redo(5U, error).applied(), "redo C");
+    require(session->undo(6U, error).applied(), "undo C again");
+    require(session->undo(7U, error).applied(), "undo B");
+    require(
+        session->setTempo(8U, 130.0, error).applied(),
+        "edit D clears the abandoned branch"
+    );
+
+    const auto journal =
+        iramix::session::JournaledSession::journalPathForProject(
+            project
+        );
+    auto recovered =
+        iramix::persistence::recoverCommandJournal(journal);
+    require(
+        recovered.ok() && recovered.commands.size() == 8U,
+        "pre-checkpoint journal retains all history actions"
+    );
+    require(
+        !session->checkpoint(8U, error),
+        "checkpoint rejects a snapshot older than live state"
+    );
+    recovered =
+        iramix::persistence::recoverCommandJournal(journal);
+    require(
+        recovered.ok() && recovered.commands.size() == 8U,
+        "rejected checkpoint leaves original journal authoritative"
+    );
+
+    std::error_code sizeError;
+    const auto originalBytes =
+        std::filesystem::file_size(journal, sizeError);
+    require(!sizeError, "original journal size is readable");
+    saveSnapshot(project, session->snapshot());
+    const auto checkpointStarted =
+        std::chrono::steady_clock::now();
+    require(session->checkpoint(9U, error), error.c_str());
+    const double checkpointMilliseconds =
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - checkpointStarted
+        ).count();
+    const auto compactedBytes =
+        std::filesystem::file_size(journal, sizeError);
+    require(!sizeError, "compacted journal size is readable");
+    recovered =
+        iramix::persistence::recoverCommandJournal(journal);
+    require(
+        recovered.ok()
+            && recovered.commands.size() == 2U
+            && recovered.commands.front().sequence == 8U
+            && recovered.commands.back().sequence == 9U,
+        "checkpoint removes dead branches and retains active undo"
+    );
+
+    session.reset();
+    session =
+        iramix::session::JournaledSession::open(project, error);
+    require(session != nullptr, error.c_str());
+    require(
+        session->currentRevision() == 9U
+            && session->undoDepth() == 2U
+            && session->redoDepth() == 0U
+            && session->snapshot()->tempo == 130.0,
+        "compacted edit stack reconstructs from durable snapshot"
+    );
+    require(
+        session->undo(9U, error).applied()
+            && session->snapshot()->tempo == 121.0,
+        "new command appends after compacted journal sequence"
+    );
+    saveSnapshot(project, session->snapshot());
+    require(session->checkpoint(10U, error), error.c_str());
+    recovered =
+        iramix::persistence::recoverCommandJournal(journal);
+    require(
+        recovered.ok()
+            && recovered.commands.size() == 3U
+            && recovered.commands.back().sequence == 10U,
+        "checkpoint retains one redo branch in minimal form"
+    );
+
+    session.reset();
+    session =
+        iramix::session::JournaledSession::open(project, error);
+    require(session != nullptr, error.c_str());
+    require(
+        session->undoDepth() == 1U
+            && session->redoDepth() == 1U
+            && session->redo(10U, error).applied()
+            && session->snapshot()->tempo == 130.0,
+        "compacted redo stack reconstructs and reapplies"
+    );
+
+    std::cout
+        << "Journal checkpoint: original_records=8, "
+           "active_undo_records=2, redo_checkpoint_records=3, "
+           "dead_branch_records_removed=6, stable_revision=10, "
+           "original_bytes=" << originalBytes
+        << ", compacted_bytes=" << compactedBytes
+        << ", checkpoint_ms=" << checkpointMilliseconds << '\n';
+}
+
+void testAutosaveScheduler(const std::filesystem::path& root) {
+    const auto project = root / "autosave-session.irpx";
+    std::string error;
+    auto session =
+        iramix::session::JournaledSession::open(project, error);
+    require(session != nullptr, error.c_str());
+    auto service =
+        iramix::persistence::SessionPersistenceService::create(
+            project,
+            std::chrono::milliseconds {30},
+            error
+        );
+    require(service != nullptr, error.c_str());
+    require(service->start(error), error.c_str());
+
+    const auto started = std::chrono::steady_clock::now();
+    require(
+        session->setTempo(1U, 121.0, error).applied(),
+        "first autosave edit applies"
+    );
+    require(
+        service->markDirty(session->snapshot())
+            == iramix::persistence::AutosaveDirtyStatus::tracked,
+        "first dirty revision starts a fixed autosave window"
+    );
+    std::this_thread::sleep_for(std::chrono::milliseconds {5});
+    require(
+        session->setTempo(2U, 122.0, error).applied(),
+        "second autosave edit applies"
+    );
+    require(
+        service->markDirty(session->snapshot())
+            == iramix::persistence::AutosaveDirtyStatus::replaced,
+        "newer edit replaces the tracked autosave snapshot"
+    );
+    std::this_thread::sleep_for(std::chrono::milliseconds {5});
+    require(
+        session->setTempo(3U, 123.0, error).applied(),
+        "third autosave edit applies"
+    );
+    require(
+        service->markDirty(session->snapshot())
+            == iramix::persistence::AutosaveDirtyStatus::replaced,
+        "continuous edits coalesce to the latest revision"
+    );
+
+    const auto timeout = std::chrono::steady_clock::now()
+        + std::chrono::seconds {5};
+    auto query = service->query(4U);
+    while (
+        query.status
+            != iramix::persistence::SessionSaveQueryStatus::committed
+        && std::chrono::steady_clock::now() < timeout
+    ) {
+        std::this_thread::sleep_for(std::chrono::milliseconds {1});
+        query = service->query(4U);
+    }
+    const auto elapsed =
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - started
+        ).count();
+    const auto dirtyRevision = service->dirtyRevision();
+    const auto autosaveRequests =
+        service->autosaveRequestCount();
+    const auto dirtyReplacements =
+        service->dirtyReplacementCount();
+    require(
+        query.status
+                == iramix::persistence::
+                    SessionSaveQueryStatus::committed
+            && query.durableRevision == 4U
+            && dirtyRevision == 0U
+            && autosaveRequests >= 1U
+            && autosaveRequests <= 3U
+            && dirtyReplacements == 2U,
+        "autosave commits the newest continuous-edit revision"
+    );
+    require(elapsed < 1'000.0, "autosave fixed window does not starve");
+    service->stop();
+
+    const auto loaded =
+        iramix::persistence::loadProjectSnapshot(project);
+    require(loaded.ok, loaded.error.c_str());
+    const auto decoded =
+        iramix::persistence::deserializeSessionDocument(
+            loaded.payload
+        );
+    require(
+        decoded.ok()
+            && decoded.document.revision == 4U
+            && decoded.document.tempo == 123.0,
+        "autosaved project reopens at the latest dirty revision"
+    );
+
+    const auto shutdownProject =
+        root / "shutdown-flush-session.irpx";
+    auto shutdownSession =
+        iramix::session::JournaledSession::open(
+            shutdownProject,
+            error
+        );
+    require(shutdownSession != nullptr, error.c_str());
+    auto shutdownService =
+        iramix::persistence::SessionPersistenceService::create(
+            shutdownProject,
+            std::chrono::seconds {10},
+            error
+        );
+    require(shutdownService != nullptr, error.c_str());
+    require(shutdownService->start(error), error.c_str());
+    require(
+        shutdownSession->setTempo(1U, 144.0, error).applied(),
+        "shutdown fixture edit applies"
+    );
+    require(
+        shutdownService->markDirty(shutdownSession->snapshot())
+            == iramix::persistence::AutosaveDirtyStatus::tracked,
+        "shutdown fixture tracks dirty state"
+    );
+    shutdownService->stop();
+    require(
+        shutdownService->durableRevision() == 2U,
+        "shutdown flushes the latest dirty revision"
+    );
+
+    std::cout
+        << "Autosave scheduler: interval_ms=30, edits=3, "
+           "autosave_requests=" << autosaveRequests
+        << ", dirty_replacements=" << dirtyReplacements << ", "
+           "durable_revision=4, elapsed_ms=" << elapsed
+        << ", shutdown_flush_revision=2\n";
+}
+
 void testSaveCoalescing(const std::filesystem::path& root) {
     iramix::session::SessionController controller;
     const auto revisionOne = controller.snapshot();
@@ -651,6 +921,8 @@ int main() {
     testSessionController();
     testJournaledSession(temporary.path());
     testJournaledEditLatency(temporary.path());
+    testJournalCheckpointCompaction(temporary.path());
+    testAutosaveScheduler(temporary.path());
     testSaveCoalescing(temporary.path());
     testRunningCoordinator(temporary.path());
     testReferenceSnapshotBenchmark();

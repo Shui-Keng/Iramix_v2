@@ -7,6 +7,7 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 
 public final class ArchitectureSmoke {
     private ArchitectureSmoke() {}
@@ -28,7 +29,8 @@ public final class ArchitectureSmoke {
         var project = temporary.resolve("session.irpx");
         try (var session = EngineSession.launch(
             Path.of(engineProbe),
-            project
+            project,
+            Duration.ofMillis(50)
         )) {
             var welcome = session.welcome();
             if (welcome.protocolVersion() != IpcProtocol.VERSION) {
@@ -62,6 +64,15 @@ public final class ArchitectureSmoke {
             if (revision != 4) {
                 throw new AssertionError(
                     "Revisioned redo did not apply."
+                );
+            }
+            var autosaved = session.awaitAutosave(revision);
+            if (
+                autosaved.revision() != revision
+                || autosaved.serializedBytes() == 0
+            ) {
+                throw new AssertionError(
+                    "Timed autosave did not commit revision 4."
                 );
             }
             if (!welcome.capabilities().contains("save_session")) {
@@ -99,7 +110,8 @@ public final class ArchitectureSmoke {
         }
         try (var recovered = EngineSession.launch(
             Path.of(engineProbe),
-            project
+            project,
+            Duration.ofMillis(50)
         )) {
             var revision = recovered.currentSessionRevision();
             if (revision != 5) {

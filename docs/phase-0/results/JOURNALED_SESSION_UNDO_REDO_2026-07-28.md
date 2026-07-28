@@ -133,11 +133,16 @@ It does not prove:
 
 - the below-10-ms end-to-end command target under UI load;
 - physical power-loss behavior of the storage device;
-- safe journal compaction after snapshot retention;
-- timed autosave and backup rotation;
+- physical power-loss behavior during journal replacement;
+- backup rotation and retention;
 - full DAW command/state coverage;
 - real AWT workspace integration;
 - hardware/storage equivalence across the three target OSes.
 
 Hosted CI is portability and sanitizer evidence, not storage-hardware or
 power-loss evidence.
+
+Timed autosave and revision-gated journal compaction were addressed by the
+next slice:
+[`AUTOSAVE_CHECKPOINT_COMPACTION_2026-07-28.md`](AUTOSAVE_CHECKPOINT_COMPACTION_2026-07-28.md).
+Backup rotation remains pending.

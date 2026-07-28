@@ -26,6 +26,15 @@ single crash capable of destroying otherwise valid work.
 - Undo and redo are journal records with new monotonic revisions. Recovery
   loads a snapshot, replays only newer state changes, and reads retained older
   records to rebuild undo/redo stacks.
+- Autosave uses a fixed window anchored to the first dirty revision, capped at
+  five seconds in the engine probe. Continuous edits replace the immutable
+  candidate snapshot without starving the deadline.
+- The persistence service owns save polling on a background control worker and
+  flushes the latest dirty revision during orderly shutdown.
+- Journal compaction requires
+  `durable snapshot revision == live session revision`. It writes a minimal
+  reconstructible undo/redo history to a sibling staging file, durably flushes
+  it, and atomically replaces the old journal. Any mismatch defers compaction.
 - Recording staging uses a versioned header and individually sequenced,
   checksummed audio blocks.
 - Recovery accepts only the longest valid prefix. Partial, corrupt, or
@@ -84,6 +93,11 @@ File durability uses `_commit` on Windows and `fsync` on POSIX.
   only by a newer revision.
 - A stale or invalid edit creates no journal record; undo/redo replay preserves
   stable IDs and deterministic state across process reopen.
+- Continuous dirty revisions autosave to the newest observed snapshot without
+  indefinite debounce, and shutdown flushes a revision whose normal deadline
+  has not yet elapsed.
+- Rejected stale checkpoints leave the original journal unchanged; successful
+  compaction reconstructs both active undo and redo after reopen.
 
 ## Initial evidence
 
@@ -103,6 +117,6 @@ worker and reports separate serialization and durable-save timing.
 The Java/C++ probe now queries and edits the native session before save, then
 reopens the project, reconstructs undo history, applies another journaled undo,
 and saves that revision. The edit surface and schema are still partial. Final
-media conversion, complete DAW session coverage, autosave/journal compaction,
+media conversion, complete DAW session coverage, backup rotation,
 full-scale large-recording timing, power-loss injection, and cold
 reference-project measurements remain pending, so this ADR remains proposed.
