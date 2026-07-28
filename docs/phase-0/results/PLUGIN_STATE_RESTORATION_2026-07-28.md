@@ -127,6 +127,18 @@ evidence:
 A rejected restore increments `stateRejections` and **not** `stateRestores`:
 the counters distinguish "the plugin was asked" from "the plugin agreed".
 
+## CI and sanitizer results
+
+GitHub Actions:
+[`30377069243`](https://github.com/Shui-Keng/Iramix_v2/actions/runs/30377069243)
+
+All five jobs passed on Windows (MSVC), macOS, and Linux, including
+ASan/UBSan and TSan. TSan is the one that matters most for this slice: the
+state region is written by one process and read by another under a
+sequence pair distinct from the audio one, and a missing release/acquire
+edge there would show up as a rare wrong-state restore rather than an
+obvious failure.
+
 ## Evidence boundary
 
 This proves the state transfer contract — bounded restore and capture off
