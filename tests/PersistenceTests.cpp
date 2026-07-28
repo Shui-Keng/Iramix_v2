@@ -2,6 +2,7 @@
 #include "iramix/persistence/AsyncSessionSaver.hpp"
 #include "iramix/persistence/CommandJournal.hpp"
 #include "iramix/persistence/DiskAudioWorkers.hpp"
+#include "iramix/persistence/ProjectBackupStore.hpp"
 #include "iramix/persistence/ProjectStore.hpp"
 #include "iramix/persistence/RecoverableRecording.hpp"
 #include "iramix/persistence/SessionDocument.hpp"
@@ -185,6 +186,143 @@ void testAtomicProjectStore(const std::filesystem::path& root) {
     std::cout
         << "Atomic project store: committed_revisions=2, "
            "injected_failures=2, staging_recoveries=1\n";
+}
+
+void testProjectBackupRotation(
+    const std::filesystem::path& root
+) {
+    const auto directory = root / "revisioned-backups";
+    const iramix::persistence::ProjectBackupPolicy policy {
+        .directory = directory,
+        .retainedBackups = 3U,
+    };
+
+    for (std::uint64_t revision = 1U; revision <= 5U; ++revision) {
+        const auto payload =
+            bytesOf("backup-revision-" + std::to_string(revision));
+        const auto saved = iramix::persistence::saveProjectBackup(
+            policy,
+            revision,
+            payload
+        );
+        require(saved.committed, saved.error.c_str());
+        require(
+            saved.retentionApplied,
+            "successful backup applies retention"
+        );
+    }
+
+    const auto unknown = directory / "do-not-prune.user-data";
+    {
+        std::ofstream output {unknown, std::ios::binary};
+        output << "owned by user";
+    }
+    const auto sixthPayload = bytesOf("backup-revision-6");
+    const auto sixth = iramix::persistence::saveProjectBackup(
+        policy,
+        6U,
+        sixthPayload
+    );
+    require(
+        sixth.committed
+            && sixth.retentionApplied
+            && sixth.prunedCount == 1U
+            && sixth.retainedCount == 3U,
+        sixth.error.c_str()
+    );
+
+    const auto listing =
+        iramix::persistence::listProjectBackups(directory);
+    require(listing.ok, listing.error.c_str());
+    require(
+        listing.entries.size() == 3U
+            && listing.entries[0].revision == 6U
+            && listing.entries[1].revision == 5U
+            && listing.entries[2].revision == 4U,
+        "retention keeps the newest three revisioned backups"
+    );
+    require(
+        std::filesystem::exists(unknown),
+        "retention never removes an unrecognized user file"
+    );
+
+    const auto corruptNewest =
+        iramix::persistence::projectBackupPath(directory, 7U);
+    {
+        std::ofstream output {corruptNewest, std::ios::binary};
+        output << "not an Iramix project envelope";
+    }
+    const auto recovered =
+        iramix::persistence::recoverNewestProjectBackup(directory);
+    require(recovered.recovered, recovered.error.c_str());
+    require(
+        recovered.revision == 6U
+            && recovered.skippedInvalidCount == 1U
+            && textOf(recovered.payload) == "backup-revision-6",
+        "recovery skips corrupt newest backup and selects prior valid"
+    );
+
+    const auto project = root / "backup-failure-isolation.irpx";
+    const auto invalidBackupDirectory =
+        root / "backup-path-is-a-file";
+    {
+        std::ofstream output {
+            invalidBackupDirectory,
+            std::ios::binary
+        };
+        output << "prevents directory creation";
+    }
+    std::string error;
+    auto saver = iramix::persistence::AsyncSessionSaver::create(
+        project,
+        1U,
+        error,
+        {
+            .directory = invalidBackupDirectory,
+            .retainedBackups = 3U,
+        }
+    );
+    require(saver != nullptr, error.c_str());
+    iramix::persistence::SessionDocument document;
+    document.revision = 1U;
+    document.tracks.push_back({
+        .stableId = 1U,
+        .type = iramix::persistence::SessionTrackType::audio,
+        .gain = 1.0F,
+        .color = 0U,
+        .name = "Primary remains durable",
+    });
+    const auto snapshot =
+        std::make_shared<const iramix::persistence::SessionDocument>(
+            std::move(document)
+        );
+    require(saver->start(error), error.c_str());
+    require(
+        saver->trySubmit(1U, snapshot)
+            == iramix::persistence::ProjectSaveSubmitResult::accepted,
+        "backup failure isolation save is accepted"
+    );
+    saver->stop();
+    iramix::persistence::SessionSaveCompletion completion;
+    require(
+        saver->tryPopCompletion(completion)
+            && completion.status
+                == iramix::persistence::
+                    ProjectSaveCompletionStatus::committed
+            && completion.backupStatus
+                == iramix::persistence::
+                    SessionBackupCompletionStatus::failed
+            && completion.backupDetail[0] != '\0',
+        "backup failure is observable without downgrading primary ACK"
+    );
+    const auto primary =
+        iramix::persistence::loadProjectSnapshot(project);
+    require(primary.ok, primary.error.c_str());
+
+    std::cout
+        << "Project backups: committed=6, retention=3, pruned=3, "
+           "corrupt_skipped=1, unknown_files_preserved=1, "
+           "primary_ack_isolated_from_backup_failure=1\n";
 }
 
 void testSessionDocumentRoundTrip(
@@ -1752,6 +1890,7 @@ int main(const int argc, char* argv[]) {
 
     TemporaryDirectory temporary;
     testAtomicProjectStore(temporary.path());
+    testProjectBackupRotation(temporary.path());
     testSessionDocumentRoundTrip(temporary.path());
     testAsyncProjectSaver(temporary.path());
     testReferenceProjectBenchmark(temporary.path());

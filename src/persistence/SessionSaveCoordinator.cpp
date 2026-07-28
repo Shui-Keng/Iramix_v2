@@ -23,12 +23,19 @@ std::unique_ptr<SessionSaveCoordinator>
 SessionSaveCoordinator::create(
     std::filesystem::path target,
     std::string& error,
-    const std::uint64_t initialDurableRevision
+    const std::uint64_t initialDurableRevision,
+    const std::uint32_t backupRetention
 ) {
+    const auto backupDirectory =
+        defaultProjectBackupDirectory(target);
     auto saver = AsyncSessionSaver::create(
         std::move(target),
         1U,
-        error
+        error,
+        {
+            .directory = backupDirectory,
+            .retainedBackups = backupRetention,
+        }
     );
     if (saver == nullptr) {
         return {};

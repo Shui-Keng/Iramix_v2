@@ -88,6 +88,16 @@ The exchange guard is a `ReentrantLock`, not a Java `synchronized` monitor:
 blocking pipe reads while holding a monitor can pin a Java 21 virtual thread
 and starve the reader task. The lock is released between durability polls.
 
+For project-backed production saves, the worker then writes a revisioned
+backup from the exact same immutable serialized payload and applies retention
+before publishing the completion. The primary save outcome and backup outcome
+are independent: a committed primary remains `committed` if backup creation
+fails. Completion fields `backup_status`, `backup_ns`, `backup_pruned`, and
+`backup_retained` expose `disabled`, `committed`, `retention_warning`, or
+`failed`; `backup_detail` is present only for a warning or failure. The
+production default keeps ten strict `revision-<20 digits>.irpx` files in
+`<project>.backups/`. Unknown directory contents are never pruning targets.
+
 An unknown revision returns `none` from `POLL_SAVE_COMPLETION` because a timed
 autosave may not yet have reached its fixed deadline. This lets the UI wait for
 autosave without first issuing `SAVE_SESSION`.

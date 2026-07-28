@@ -98,16 +98,43 @@ bool configureBinaryStandardStreams() {
                 ProjectSaveCompletionStatus::committed
         ? "committed"
         : "failed";
+    std::string_view backupStatus;
+    using iramix::persistence::SessionBackupCompletionStatus;
+    switch (completion.backupStatus) {
+    case SessionBackupCompletionStatus::disabled:
+        backupStatus = "disabled";
+        break;
+    case SessionBackupCompletionStatus::committed:
+        backupStatus = "committed";
+        break;
+    case SessionBackupCompletionStatus::committedRetentionWarning:
+        backupStatus = "retention_warning";
+        break;
+    case SessionBackupCompletionStatus::failed:
+        backupStatus = "failed";
+        break;
+    }
     auto payload = std::string {status}
         + ";revision=" + std::to_string(completion.revision)
         + ";bytes=" + std::to_string(completion.serializedBytes)
         + ";serialize_ns="
         + std::to_string(completion.serializationNanoseconds)
         + ";save_ns="
-        + std::to_string(completion.durableSaveNanoseconds);
+        + std::to_string(completion.durableSaveNanoseconds)
+        + ";backup_status=" + std::string {backupStatus}
+        + ";backup_ns="
+        + std::to_string(completion.backupNanoseconds)
+        + ";backup_pruned="
+        + std::to_string(completion.backupPrunedCount)
+        + ";backup_retained="
+        + std::to_string(completion.backupRetainedCount);
     if (completion.detail[0] != '\0') {
         payload += ";detail=";
         payload += completion.detail.data();
+    }
+    if (completion.backupDetail[0] != '\0') {
+        payload += ";backup_detail=";
+        payload += completion.backupDetail.data();
     }
     return payload;
 }

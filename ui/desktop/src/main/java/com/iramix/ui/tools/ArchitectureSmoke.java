@@ -91,6 +91,9 @@ public final class ArchitectureSmoke {
                 || saved.serializedBytes() == 0
                 || saved.serializationNanoseconds() == 0
                 || saved.durableSaveNanoseconds() == 0
+                || !"committed".equals(saved.backupStatus())
+                || saved.backupNanoseconds() == 0
+                || saved.backupRetainedCount() == 0
                 || !Files.isRegularFile(project)
             ) {
                 throw new AssertionError(
@@ -103,6 +106,10 @@ public final class ArchitectureSmoke {
                     + saved.serializedBytes() + ", serialize_ns="
                     + saved.serializationNanoseconds() + ", save_ns="
                     + saved.durableSaveNanoseconds()
+                    + ", backup_status=" + saved.backupStatus()
+                    + ", backup_ns=" + saved.backupNanoseconds()
+                    + ", backup_retained="
+                    + saved.backupRetainedCount()
                     + ", production_revision=" + revision
                     + ", covered_revision=" + covered.revision()
                     + ")."
@@ -132,6 +139,16 @@ public final class ArchitectureSmoke {
                 );
             }
         } finally {
+            var backupDirectory = Path.of(project + ".backups");
+            if (Files.isDirectory(backupDirectory)) {
+                try (var paths = Files.walk(backupDirectory)) {
+                    for (var path : paths.sorted(
+                        java.util.Comparator.reverseOrder()
+                    ).toList()) {
+                        Files.deleteIfExists(path);
+                    }
+                }
+            }
             Files.deleteIfExists(
                 Path.of(project + ".commands.irjc")
             );

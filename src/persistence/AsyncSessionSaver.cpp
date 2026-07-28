@@ -50,9 +50,11 @@ struct AsyncSessionSaver::Impl final {
 
     Impl(
         std::filesystem::path projectTarget,
-        const std::uint32_t pipelineCapacity
+        const std::uint32_t pipelineCapacity,
+        ProjectBackupPolicy projectBackupPolicy
     )
         : target {std::move(projectTarget)},
+          backupPolicy {std::move(projectBackupPolicy)},
           capacity {pipelineCapacity},
           slots(pipelineCapacity) {}
 
@@ -121,11 +123,49 @@ struct AsyncSessionSaver::Impl final {
                 ? ProjectSaveCompletionStatus::committed
                 : ProjectSaveCompletionStatus::failed;
             copyDetail(error, completion.detail);
+
+            if (committed && backupPolicy.enabled()) {
+                const auto backupStarted =
+                    std::chrono::steady_clock::now();
+                ProjectBackupSaveResult backup;
+                try {
+                    backup = saveProjectBackup(
+                        backupPolicy,
+                        completion.revision,
+                        payload
+                    );
+                } catch (const std::exception& exception) {
+                    backup.error = "project backup exception: ";
+                    backup.error += exception.what();
+                } catch (...) {
+                    backup.error = "unknown project backup exception";
+                }
+                completion.backupNanoseconds =
+                    elapsedNanoseconds(backupStarted);
+                completion.backupPrunedCount = backup.prunedCount;
+                completion.backupRetainedCount = backup.retainedCount;
+                if (!backup.committed) {
+                    completion.backupStatus =
+                        SessionBackupCompletionStatus::failed;
+                } else if (!backup.retentionApplied) {
+                    completion.backupStatus =
+                        SessionBackupCompletionStatus::
+                            committedRetentionWarning;
+                } else {
+                    completion.backupStatus =
+                        SessionBackupCompletionStatus::committed;
+                }
+                copyDetail(
+                    backup.error,
+                    completion.backupDetail
+                );
+            }
             processIndex.store(process + 1U, std::memory_order_release);
         }
     }
 
     std::filesystem::path target;
+    ProjectBackupPolicy backupPolicy;
     std::uint64_t capacity {0U};
     std::vector<Slot> slots;
     std::thread thread;
@@ -153,7 +193,8 @@ AsyncSessionSaver::~AsyncSessionSaver() {
 std::unique_ptr<AsyncSessionSaver> AsyncSessionSaver::create(
     std::filesystem::path target,
     const std::uint32_t pipelineCapacity,
-    std::string& error
+    std::string& error,
+    ProjectBackupPolicy backupPolicy
 ) {
     error.clear();
     if (target.empty()) {
@@ -169,7 +210,8 @@ std::unique_ptr<AsyncSessionSaver> AsyncSessionSaver::create(
             new AsyncSessionSaver {
                 std::make_unique<Impl>(
                     std::move(target),
-                    pipelineCapacity
+                    pipelineCapacity,
+                    std::move(backupPolicy)
                 )
             }
         };

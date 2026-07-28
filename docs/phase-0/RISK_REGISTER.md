@@ -66,7 +66,11 @@ confirmation. Fixed-window autosave, orderly-shutdown flush, and
 revision-gated history compaction now have local evidence in
 [`AUTOSAVE_CHECKPOINT_COMPACTION_2026-07-28.md`](results/AUTOSAVE_CHECKPOINT_COMPACTION_2026-07-28.md).
 Hosted Windows, macOS, Linux, Java 21, ASan/UBSan, and TSan confirmation for
-that slice is green. R-06 remains open for complete state, cold storage,
-backup rotation, and physical power-loss evidence. The first
+that slice is green. Revisioned backup creation, bounded retention,
+unknown-file preservation, corrupt-envelope skipping, and primary/backup
+failure isolation now have local evidence in
+[`PROJECT_BACKUP_ROTATION_2026-07-28.md`](results/PROJECT_BACKUP_ROTATION_2026-07-28.md).
+R-06 remains open for hosted confirmation of that slice, automatic restore,
+complete state, cold storage, and physical power-loss evidence. The first
 durable-command latency p99 also missed the provisional 10 ms control target,
 so performance optimization must not be treated as complete.

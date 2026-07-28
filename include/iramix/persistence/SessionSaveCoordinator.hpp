@@ -47,7 +47,8 @@ public:
     [[nodiscard]] static std::unique_ptr<SessionSaveCoordinator> create(
         std::filesystem::path target,
         std::string& error,
-        std::uint64_t initialDurableRevision = 0U
+        std::uint64_t initialDurableRevision = 0U,
+        std::uint32_t backupRetention = 10U
     );
 
     [[nodiscard]] bool start(std::string& error);

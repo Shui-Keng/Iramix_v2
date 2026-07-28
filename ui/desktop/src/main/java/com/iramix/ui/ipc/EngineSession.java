@@ -466,7 +466,11 @@ public final class EngineSession implements AutoCloseable {
                 revision,
                 Long.parseLong(fields.get("bytes")),
                 Long.parseLong(fields.get("serialize_ns")),
-                Long.parseLong(fields.get("save_ns"))
+                Long.parseLong(fields.get("save_ns")),
+                fields.get("backup_status"),
+                Long.parseLong(fields.get("backup_ns")),
+                Long.parseLong(fields.get("backup_pruned")),
+                Long.parseLong(fields.get("backup_retained"))
             );
         } catch (NullPointerException | NumberFormatException exception) {
             throw new IOException(
