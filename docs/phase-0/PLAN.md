@@ -145,7 +145,7 @@ Exit evidence:
 | P0-009 | User interviews | Not started |
 | P0-010 | Dependency/license inventory | Not started |
 | P0-011 | Immutable real-time graph core | Windows production path, 5,001-publication sanitizer edit-storm, cross-block ramps, sample-rate modulation, and denormal protection verified; other backends and final soak pending |
-| P0-012 | Disk and session resilience | Background schema serialization and revisioned Java/C++ durable-save completion added; atomic recovery, bounded workers, schema v3, migrations, and reference benchmark covered; production-session ownership, complete state, cold hardware benchmarks, and media/plugin restoration pending |
+| P0-012 | Disk and session resilience | Background schema serialization and revisioned Java/C++ durable-save completion verified on three-OS CI/sanitizers; atomic recovery, bounded workers, schema v3, migrations, and reference benchmark covered; production-session ownership, complete state, cold hardware benchmarks, and media/plugin restoration pending |
 | P0-013 | Plugin process isolation | Not started |
 | P0-014 | Phase 0 exit review and Phase 1 backlog | Not started |
 

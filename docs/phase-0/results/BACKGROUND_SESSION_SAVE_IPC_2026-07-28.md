@@ -1,7 +1,7 @@
 # Background Session Save and IPC — 2026-07-28
 
-Status: Windows local screening passed; hosted three-OS CI pending for this
-source revision. P0-012 remains open.
+Status: Windows local screening and hosted three-OS CI/sanitizers passed.
+P0-012 remains open.
 
 ## Scope
 
@@ -95,6 +95,15 @@ UI frame.
 - Java architecture smoke passed against the MSVC Debug and Release engine
   probes.
 
+Source commit:
+`f39da861146fd455249f00d19458d2d2622fbd89`
+
+GitHub Actions:
+[`30342677269`](https://github.com/Shui-Keng/Iramix_v2/actions/runs/30342677269)
+
+The complete C++ suite and Java/C++ background-save smoke passed on Windows,
+macOS, and Ubuntu. ASan/UBSan and TSan also passed without diagnostics.
+
 ## Evidence boundary
 
 This proves bounded background schema serialization, ordered durable
@@ -110,5 +119,5 @@ It does not yet prove:
 - cold-cache or reference-storage performance;
 - hardware behavior on macOS/Linux.
 
-Hosted CI can verify source portability and sanitizers, but it is not
+Hosted CI verifies source portability and sanitizer behavior, but it is not
 reference-storage or audio-hardware evidence.
