@@ -1,7 +1,10 @@
 #include "iramix/persistence/CommandJournal.hpp"
+#include "iramix/persistence/DiskAudioWorkers.hpp"
 #include "iramix/persistence/ProjectStore.hpp"
 #include "iramix/persistence/RecoverableRecording.hpp"
+#include "iramix/realtime/Audit.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -13,6 +16,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #if defined(_WIN32)
@@ -75,6 +79,19 @@ public:
 private:
     std::filesystem::path path_;
 };
+
+template <typename Predicate>
+[[nodiscard]] bool waitUntil(Predicate&& predicate) {
+    const auto deadline = std::chrono::steady_clock::now()
+        + std::chrono::seconds {5};
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (predicate()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds {1});
+    }
+    return predicate();
+}
 
 void testAtomicProjectStore(const std::filesystem::path& root) {
     const auto project = root / "project" / "session.irpx";
@@ -348,6 +365,18 @@ void testRecoverableRecording(
             && recovered.discardedInvalidTail,
         "recording keeps flushed blocks and discards crash tail"
     );
+    const auto scan =
+        iramix::persistence::scanRecording(recording);
+    require(scan.ok(), scan.error.c_str());
+    require(
+        scan.blockCount == 2U
+            && scan.frameCount == 4U
+            && scan.validBytes == 96U
+            && scan.fileBytes == 103U
+            && scan.streamingBufferBytes == 64U * 1024U
+            && scan.discardedInvalidTail,
+        "streaming scan finds the longest valid recording prefix"
+    );
 
     const auto corrupt = root / "take-corrupt.irrc";
     std::filesystem::copy_file(recording, corrupt);
@@ -372,11 +401,292 @@ void testRecoverableRecording(
             && recovered.discardedInvalidTail,
         "recording checksum rejects corrupt block and suffix"
     );
+    std::string error;
+    require(
+        iramix::persistence::repairRecordingTail(
+            recording,
+            scan,
+            error
+        ),
+        error.c_str()
+    );
+    const auto repairedScan =
+        iramix::persistence::scanRecording(recording);
+    require(
+        repairedScan.ok()
+            && repairedScan.fileBytes == 96U
+            && repairedScan.validBytes == 96U
+            && !repairedScan.discardedInvalidTail,
+        "recording repair truncates only the invalid suffix"
+    );
 
     std::cout
         << "Recoverable recording: forced_exit=77, "
            "flushed_blocks=2, recovered_frames=4, "
-           "partial_tails_discarded=1, corrupt_blocks_rejected=1\n";
+           "partial_tails_discarded=1, corrupt_blocks_rejected=1, "
+           "stream_scan_buffer_bytes="
+        << scan.streamingBufferBytes
+        << ", repaired_bytes=7\n";
+}
+
+void testDiskAudioWorkers(const std::filesystem::path& root) {
+    const auto recording = root / "worker-take.irrc";
+    std::string error;
+    auto recorder =
+        iramix::persistence::RecordingDiskWorker::create(
+            recording,
+            {
+                .format = {
+                    .sampleRate = 48'000U,
+                    .channelCount = 2U,
+                },
+                .maximumFramesPerBlock = 2U,
+                .queueBlockCapacity = 2U,
+                .durableFlushEveryBlocks = 2U,
+            },
+            error
+        );
+    require(recorder != nullptr, error.c_str());
+    const std::array<float, 4> first {
+        0.1F, -0.1F, 0.2F, -0.2F,
+    };
+    const std::array<float, 4> second {
+        0.3F, -0.3F, 0.4F, -0.4F,
+    };
+
+    iramix::realtime::resetAuditCounters();
+    bool firstAccepted = false;
+    bool secondAccepted = false;
+    bool saturationRejected = false;
+    {
+        iramix::realtime::CallbackScope callback;
+        firstAccepted = recorder->tryEnqueue(first, 2U);
+        secondAccepted = recorder->tryEnqueue(second, 2U);
+        saturationRejected = !recorder->tryEnqueue(first, 2U);
+    }
+    const auto recordingAudit =
+        iramix::realtime::auditSnapshot();
+    require(
+        firstAccepted && secondAccepted && saturationRejected,
+        "recording queue accepts capacity and reports saturation"
+    );
+    require(
+        recordingAudit.allocations == 0U
+            && recordingAudit.deallocations == 0U
+            && recordingAudit.blockingLocks == 0U,
+        "recording callback path has zero allocation and blocking locks"
+    );
+    require(recorder->start(error), error.c_str());
+    recorder->stop();
+    require(!recorder->failed(), recorder->lastError().c_str());
+    require(
+        recorder->acceptedBlocks() == 2U
+            && recorder->rejectedBlocks() == 1U
+            && recorder->writtenBlocks() == 2U
+            && recorder->bufferedBlocks() == 0U
+            && recorder->queueStorageBytes() == 40U,
+        "recording worker drains a fixed-capacity queue"
+    );
+
+    const auto scan =
+        iramix::persistence::scanRecording(recording);
+    std::cout
+        << "Recording worker scan: ok=" << scan.ok()
+        << ", blocks=" << scan.blockCount
+        << ", frames=" << scan.frameCount
+        << ", valid_bytes=" << scan.validBytes
+        << ", file_bytes=" << scan.fileBytes
+        << ", invalid_tail=" << scan.discardedInvalidTail
+        << ", error=" << scan.error << '\n';
+    require(
+        scan.ok()
+            && scan.blockCount == 2U
+            && scan.frameCount == 4U
+            && !scan.discardedInvalidTail,
+        "recording worker produces a valid recoverable stream"
+    );
+
+    auto readAhead =
+        iramix::persistence::RecordingReadAhead::create(
+            recording,
+            {
+                .maximumFramesPerBlock = 2U,
+                .queueBlockCapacity = 2U,
+            },
+            error
+        );
+    require(readAhead != nullptr, error.c_str());
+    std::array<float, 4> output {
+        1.0F, 1.0F, 1.0F, 1.0F,
+    };
+    std::uint32_t outputFrames = 0U;
+
+    iramix::realtime::resetAuditCounters();
+    bool initialUnderflow = false;
+    {
+        iramix::realtime::CallbackScope callback;
+        initialUnderflow = !readAhead->tryDequeue(
+            output,
+            outputFrames
+        );
+    }
+    auto playbackAudit = iramix::realtime::auditSnapshot();
+    require(
+        initialUnderflow
+            && outputFrames == 2U
+            && std::all_of(
+                output.begin(),
+                output.end(),
+                [](const float value) { return value == 0.0F; }
+            ),
+        "read-ahead underflow emits deterministic silence"
+    );
+    require(
+        playbackAudit.allocations == 0U
+            && playbackAudit.deallocations == 0U
+            && playbackAudit.blockingLocks == 0U,
+        "read-ahead underflow path is callback-safe"
+    );
+
+    require(readAhead->start(error), error.c_str());
+    require(
+        waitUntil([&readAhead] {
+            return readAhead->bufferedBlocks() == 2U;
+        }),
+        "read-ahead worker pre-fills its bounded queue"
+    );
+
+    std::array<float, 4> firstOutput {};
+    std::array<float, 4> secondOutput {};
+    std::array<float, 4> underflowOutput {
+        1.0F, 1.0F, 1.0F, 1.0F,
+    };
+    std::uint32_t firstFrames = 0U;
+    std::uint32_t secondFrames = 0U;
+    std::uint32_t underflowFrames = 0U;
+    bool firstDelivered = false;
+    bool secondDelivered = false;
+    bool finalUnderflow = false;
+    iramix::realtime::resetAuditCounters();
+    {
+        iramix::realtime::CallbackScope callback;
+        firstDelivered = readAhead->tryDequeue(
+            firstOutput,
+            firstFrames
+        );
+        secondDelivered = readAhead->tryDequeue(
+            secondOutput,
+            secondFrames
+        );
+        finalUnderflow = !readAhead->tryDequeue(
+            underflowOutput,
+            underflowFrames
+        );
+    }
+    playbackAudit = iramix::realtime::auditSnapshot();
+    require(
+        firstDelivered
+            && secondDelivered
+            && finalUnderflow
+            && firstFrames == 2U
+            && secondFrames == 2U
+            && firstOutput == first
+            && secondOutput == second,
+        "read-ahead callback receives blocks in order"
+    );
+    require(
+        playbackAudit.allocations == 0U
+            && playbackAudit.deallocations == 0U
+            && playbackAudit.blockingLocks == 0U,
+        "read-ahead delivery path is callback-safe"
+    );
+    require(
+        waitUntil([&readAhead] {
+            return readAhead->reachedEnd();
+        }),
+        "read-ahead worker reaches the validated prefix end"
+    );
+    readAhead->stop();
+    require(!readAhead->failed(), readAhead->lastError().c_str());
+    require(
+        readAhead->deliveredBlocks() == 2U
+            && readAhead->underflowCount() == 2U
+            && readAhead->queueStorageBytes() == 40U,
+        "read-ahead counters expose delivery and pressure"
+    );
+
+    std::cout
+        << "Disk audio workers: recording_queue_blocks=2, "
+           "recording_rejected=1, recording_written=2, "
+           "read_ahead_blocks=2, playback_underflows=2, "
+           "queue_bytes_each=40, callback_allocations="
+        << recordingAudit.allocations + playbackAudit.allocations
+        << ", callback_blocking_locks="
+        << recordingAudit.blockingLocks
+            + playbackAudit.blockingLocks
+        << '\n';
+}
+
+void testBoundedStreamingScan(
+    const std::filesystem::path& root
+) {
+    constexpr std::uint32_t blockCount = 2'048U;
+    constexpr std::uint32_t framesPerBlock = 256U;
+    constexpr std::uint32_t channelCount = 2U;
+    const auto recording = root / "streaming-scan.irrc";
+    std::string error;
+    auto writer =
+        iramix::persistence::RecoverableRecordingWriter::create(
+            recording,
+            {
+                .sampleRate = 48'000U,
+                .channelCount = channelCount,
+            },
+            error
+        );
+    require(writer != nullptr, error.c_str());
+    std::array<
+        float,
+        static_cast<std::size_t>(framesPerBlock) * channelCount
+    > block {};
+    for (std::size_t index = 0U; index < block.size(); ++index) {
+        block[index] = static_cast<float>(index % 31U) / 31.0F;
+    }
+    for (std::uint32_t index = 0U; index < blockCount; ++index) {
+        require(
+            writer->appendInterleavedBlock(
+                block,
+                framesPerBlock,
+                error
+            ),
+            error.c_str()
+        );
+    }
+    require(writer->flush(error), error.c_str());
+    writer.reset();
+
+    const auto scan =
+        iramix::persistence::scanRecording(recording);
+    require(scan.ok(), scan.error.c_str());
+    require(
+        scan.blockCount == blockCount
+            && scan.frameCount
+                == static_cast<std::uint64_t>(blockCount)
+                    * framesPerBlock
+            && scan.maximumFramesPerBlock == framesPerBlock
+            && scan.validBytes == scan.fileBytes
+            && scan.fileBytes
+                > scan.streamingBufferBytes * 64U
+            && !scan.discardedInvalidTail,
+        "streaming scan memory stays fixed as the recording grows"
+    );
+
+    std::cout
+        << "Bounded streaming scan: file_bytes=" << scan.fileBytes
+        << ", blocks=" << scan.blockCount
+        << ", frames=" << scan.frameCount
+        << ", scratch_bytes=" << scan.streamingBufferBytes
+        << ", materialized_samples=0\n";
 }
 
 } // namespace
@@ -395,6 +705,8 @@ int main(const int argc, char* argv[]) {
         std::filesystem::absolute(argv[0]),
         temporary.path()
     );
+    testDiskAudioWorkers(temporary.path());
+    testBoundedStreamingScan(temporary.path());
     std::cout << "All Iramix persistence tests passed.\n";
     return EXIT_SUCCESS;
 }

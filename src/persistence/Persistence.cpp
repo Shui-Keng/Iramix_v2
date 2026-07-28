@@ -108,6 +108,24 @@ constexpr std::size_t kRecordingBlockHeaderSize = 24U;
     return true;
 }
 
+[[nodiscard]] bool readExact(
+    std::FILE* const file,
+    void* const data,
+    const std::size_t bytes,
+    std::string& error
+) {
+    if (bytes == 0U) {
+        return true;
+    }
+    if (std::fread(data, 1U, bytes, file) == bytes) {
+        return true;
+    }
+    if (std::ferror(file) != 0) {
+        error = "file read failed: " + systemError(errno);
+    }
+    return false;
+}
+
 [[nodiscard]] bool durableFlush(
     std::FILE* const file,
     std::string& error
@@ -236,10 +254,10 @@ void appendU64(
     return matches;
 }
 
-[[nodiscard]] std::uint32_t crc32(
+[[nodiscard]] std::uint32_t updateCrc32(
+    std::uint32_t crc,
     const std::span<const std::byte> bytes
 ) noexcept {
-    std::uint32_t crc = 0xFFFF'FFFFU;
     for (const auto byte : bytes) {
         crc ^= std::to_integer<std::uint32_t>(byte);
         for (int bit = 0; bit < 8; ++bit) {
@@ -248,7 +266,13 @@ void appendU64(
             crc = (crc >> 1U) ^ (0xEDB8'8320U & mask);
         }
     }
-    return ~crc;
+    return crc;
+}
+
+[[nodiscard]] std::uint32_t crc32(
+    const std::span<const std::byte> bytes
+) noexcept {
+    return ~updateCrc32(0xFFFF'FFFFU, bytes);
 }
 
 [[nodiscard]] bool atomicReplace(
@@ -651,91 +675,396 @@ bool RecoverableRecordingWriter::flush(std::string& error) {
     return durableFlush(file_, error);
 }
 
+namespace {
+
+constexpr std::size_t kRecordingScanBufferBytes = 64U * 1024U;
+
+struct DecodedRecordingBlockHeader final {
+    std::uint64_t sequence {0U};
+    std::uint32_t frameCount {0U};
+    std::uint32_t payloadBytes {0U};
+    std::uint32_t expectedCrc {0U};
+};
+
+[[nodiscard]] bool decodeRecordingHeader(
+    const std::span<const std::byte> bytes,
+    RecordingFormat& format
+) noexcept {
+    std::size_t offset = 0U;
+    std::uint32_t version = 0U;
+    return readMagic(bytes, offset, kRecordingMagic)
+        && readU32(bytes, offset, version)
+        && version == kFormatVersion
+        && readU32(bytes, offset, format.sampleRate)
+        && readU32(bytes, offset, format.channelCount)
+        && format.sampleRate != 0U
+        && format.channelCount != 0U;
+}
+
+[[nodiscard]] bool decodeRecordingBlockHeader(
+    const std::span<const std::byte> bytes,
+    DecodedRecordingBlockHeader& header
+) noexcept {
+    std::size_t offset = 0U;
+    return readMagic(bytes, offset, kRecordingBlockMagic)
+        && readU64(bytes, offset, header.sequence)
+        && readU32(bytes, offset, header.frameCount)
+        && readU32(bytes, offset, header.payloadBytes)
+        && readU32(bytes, offset, header.expectedCrc);
+}
+
+[[nodiscard]] bool validRecordingBlockShape(
+    const DecodedRecordingBlockHeader& header,
+    const RecordingFormat format
+) noexcept {
+    if (header.frameCount == 0U) {
+        return false;
+    }
+    const std::uint64_t sampleCount =
+        static_cast<std::uint64_t>(header.frameCount)
+        * format.channelCount;
+    if (sampleCount
+        > std::numeric_limits<std::uint64_t>::max()
+            / sizeof(float)) {
+        return false;
+    }
+    const std::uint64_t expectedPayloadBytes =
+        sampleCount * sizeof(float);
+    return expectedPayloadBytes == header.payloadBytes;
+}
+
+[[nodiscard]] bool recordingFileSize(
+    const std::filesystem::path& path,
+    std::uint64_t& bytes,
+    std::string& error
+) {
+    std::error_code sizeError;
+    const auto size = std::filesystem::file_size(path, sizeError);
+    if (sizeError) {
+        error = "cannot determine recording size: "
+            + sizeError.message();
+        return false;
+    }
+    bytes = size;
+    return true;
+}
+
+} // namespace
+
+RecordingScanResult scanRecording(
+    const std::filesystem::path& path
+) {
+    RecordingScanResult result;
+    result.streamingBufferBytes = kRecordingScanBufferBytes;
+    if (!recordingFileSize(path, result.fileBytes, result.error)) {
+        return result;
+    }
+
+    auto* const file = openFile(path, L"rb", "rb");
+    if (file == nullptr) {
+        result.error = "cannot open recoverable recording: "
+            + systemError(errno);
+        return result;
+    }
+
+    std::array<std::byte, kRecordingHeaderSize> fileHeader {};
+    if (result.fileBytes < fileHeader.size()
+        || !readExact(
+            file,
+            fileHeader.data(),
+            fileHeader.size(),
+            result.error
+        )
+        || !decodeRecordingHeader(fileHeader, result.format)) {
+        if (result.error.empty()) {
+            result.error = "invalid recoverable recording header";
+        }
+        std::fclose(file);
+        return result;
+    }
+
+    result.validBytes = kRecordingHeaderSize;
+    std::uint64_t offset = kRecordingHeaderSize;
+    std::uint64_t expectedSequence = 1U;
+    std::array<std::byte, kRecordingBlockHeaderSize> blockBytes {};
+    std::array<std::byte, kRecordingScanBufferBytes> scratch {};
+
+    while (offset < result.fileBytes) {
+        if (result.fileBytes - offset < blockBytes.size()
+            || !readExact(
+                file,
+                blockBytes.data(),
+                blockBytes.size(),
+                result.error
+            )) {
+            if (!result.error.empty()) {
+                std::fclose(file);
+                return result;
+            }
+            result.discardedInvalidTail = true;
+            break;
+        }
+
+        DecodedRecordingBlockHeader header;
+        if (!decodeRecordingBlockHeader(blockBytes, header)
+            || header.sequence != expectedSequence
+            || !validRecordingBlockShape(header, result.format)
+            || static_cast<std::uint64_t>(header.payloadBytes)
+                > result.fileBytes - offset - blockBytes.size()) {
+            result.discardedInvalidTail = true;
+            break;
+        }
+
+        std::uint32_t crc = 0xFFFF'FFFFU;
+        std::uint64_t remaining = header.payloadBytes;
+        while (remaining > 0U) {
+            const auto chunk = static_cast<std::size_t>(
+                std::min<std::uint64_t>(remaining, scratch.size())
+            );
+            if (!readExact(file, scratch.data(), chunk, result.error)) {
+                if (!result.error.empty()) {
+                    std::fclose(file);
+                    return result;
+                }
+                result.discardedInvalidTail = true;
+                remaining = 0U;
+                crc = header.expectedCrc;
+                break;
+            }
+            crc = updateCrc32(
+                crc,
+                std::span<const std::byte> {scratch.data(), chunk}
+            );
+            remaining -= chunk;
+        }
+        if (result.discardedInvalidTail
+            || ~crc != header.expectedCrc) {
+            result.discardedInvalidTail = true;
+            break;
+        }
+
+        offset += blockBytes.size() + header.payloadBytes;
+        result.validBytes = offset;
+        if (header.frameCount
+            > std::numeric_limits<std::uint64_t>::max()
+                - result.frameCount) {
+            result.discardedInvalidTail = true;
+            break;
+        }
+        result.frameCount += header.frameCount;
+        ++result.blockCount;
+        result.maximumFramesPerBlock = std::max(
+            result.maximumFramesPerBlock,
+            header.frameCount
+        );
+        ++expectedSequence;
+    }
+
+    if (std::fclose(file) != 0 && result.error.empty()) {
+        result.error = "cannot close recoverable recording";
+    }
+    return result;
+}
+
+bool repairRecordingTail(
+    const std::filesystem::path& path,
+    const RecordingScanResult& scan,
+    std::string& error
+) {
+    error.clear();
+    if (!scan.ok()) {
+        error = "cannot repair recording from a failed scan";
+        return false;
+    }
+    std::uint64_t currentBytes = 0U;
+    if (!recordingFileSize(path, currentBytes, error)) {
+        return false;
+    }
+    if (currentBytes != scan.fileBytes) {
+        error = "recording changed after scan";
+        return false;
+    }
+    if (!scan.discardedInvalidTail) {
+        return true;
+    }
+    std::error_code resizeError;
+    std::filesystem::resize_file(path, scan.validBytes, resizeError);
+    if (resizeError) {
+        error = "cannot truncate invalid recording tail: "
+            + resizeError.message();
+        return false;
+    }
+    return true;
+}
+
+RecoverableRecordingReader::RecoverableRecordingReader(
+    const RecordingFormat format,
+    std::FILE* const file,
+    const std::uint64_t fileBytes
+)
+    : format_ {format},
+      file_ {file},
+      fileBytes_ {fileBytes},
+      offset_ {kRecordingHeaderSize} {}
+
+RecoverableRecordingReader::~RecoverableRecordingReader() {
+    if (file_ != nullptr) {
+        std::fclose(file_);
+    }
+}
+
+std::unique_ptr<RecoverableRecordingReader>
+RecoverableRecordingReader::create(
+    const std::filesystem::path& path,
+    std::string& error
+) {
+    error.clear();
+    std::uint64_t fileBytes = 0U;
+    if (!recordingFileSize(path, fileBytes, error)) {
+        return {};
+    }
+    auto* const file = openFile(path, L"rb", "rb");
+    if (file == nullptr) {
+        error = "cannot open recoverable recording: "
+            + systemError(errno);
+        return {};
+    }
+    std::array<std::byte, kRecordingHeaderSize> header {};
+    RecordingFormat format;
+    if (fileBytes < header.size()
+        || !readExact(file, header.data(), header.size(), error)
+        || !decodeRecordingHeader(header, format)) {
+        if (error.empty()) {
+            error = "invalid recoverable recording header";
+        }
+        std::fclose(file);
+        return {};
+    }
+    return std::unique_ptr<RecoverableRecordingReader> {
+        new RecoverableRecordingReader {format, file, fileBytes}
+    };
+}
+
+RecordingBlockReadStatus RecoverableRecordingReader::readNextBlock(
+    const std::span<float> destination,
+    std::uint32_t& frameCount,
+    std::string& error
+) {
+    frameCount = 0U;
+    error.clear();
+    if (offset_ == fileBytes_) {
+        return RecordingBlockReadStatus::cleanEnd;
+    }
+    if (offset_ > fileBytes_
+        || fileBytes_ - offset_ < kRecordingBlockHeaderSize) {
+        return RecordingBlockReadStatus::invalidTail;
+    }
+
+    std::array<std::byte, kRecordingBlockHeaderSize> blockBytes {};
+    if (!readExact(
+        file_,
+        blockBytes.data(),
+        blockBytes.size(),
+        error
+    )) {
+        return error.empty()
+            ? RecordingBlockReadStatus::invalidTail
+            : RecordingBlockReadStatus::ioError;
+    }
+
+    DecodedRecordingBlockHeader header;
+    if (!decodeRecordingBlockHeader(blockBytes, header)
+        || header.sequence != expectedSequence_
+        || !validRecordingBlockShape(header, format_)
+        || static_cast<std::uint64_t>(header.payloadBytes)
+            > fileBytes_ - offset_ - blockBytes.size()) {
+        return RecordingBlockReadStatus::invalidTail;
+    }
+    const std::size_t sampleCount =
+        static_cast<std::size_t>(header.payloadBytes / sizeof(float));
+    if (sampleCount > destination.size()) {
+        error = "recording destination is smaller than the next block";
+        return RecordingBlockReadStatus::destinationTooSmall;
+    }
+    const auto payload = std::as_writable_bytes(
+        destination.first(sampleCount)
+    );
+    if (!readExact(
+        file_,
+        payload.data(),
+        payload.size(),
+        error
+    )) {
+        return error.empty()
+            ? RecordingBlockReadStatus::invalidTail
+            : RecordingBlockReadStatus::ioError;
+    }
+    if (crc32(payload) != header.expectedCrc) {
+        return RecordingBlockReadStatus::invalidTail;
+    }
+
+    offset_ += blockBytes.size() + header.payloadBytes;
+    ++expectedSequence_;
+    frameCount = header.frameCount;
+    return RecordingBlockReadStatus::block;
+}
+
 RecordingRecoveryResult recoverRecording(
     const std::filesystem::path& path
 ) {
     RecordingRecoveryResult result;
-    std::vector<std::byte> bytes;
-    if (!readFile(path, bytes, result.error)) {
-        return result;
-    }
-    std::size_t offset = 0U;
-    std::uint32_t version = 0U;
-    if (!readMagic(bytes, offset, kRecordingMagic)
-        || !readU32(bytes, offset, version)
-        || version != kFormatVersion
-        || !readU32(bytes, offset, result.format.sampleRate)
-        || !readU32(bytes, offset, result.format.channelCount)
-        || result.format.sampleRate == 0U
-        || result.format.channelCount == 0U) {
-        result.error = "invalid recoverable recording header";
+    const auto scan = scanRecording(path);
+    result.format = scan.format;
+    result.frameCount = scan.frameCount;
+    result.blockCount = scan.blockCount;
+    result.discardedInvalidTail = scan.discardedInvalidTail;
+    if (!scan.ok()) {
+        result.error = scan.error;
         return result;
     }
 
-    std::uint64_t expectedSequence = 1U;
-    while (offset < bytes.size()) {
-        const std::size_t blockStart = offset;
-        std::uint64_t sequence = 0U;
-        std::uint32_t frameCount = 0U;
-        std::uint32_t payloadBytes = 0U;
-        std::uint32_t expectedCrc = 0U;
-        if (!readMagic(bytes, offset, kRecordingBlockMagic)
-            || !readU64(bytes, offset, sequence)
-            || !readU32(bytes, offset, frameCount)
-            || !readU32(bytes, offset, payloadBytes)
-            || !readU32(bytes, offset, expectedCrc)
-            || sequence != expectedSequence
-            || frameCount == 0U
-            || payloadBytes > bytes.size() - offset) {
-            offset = blockStart;
-            result.discardedInvalidTail = true;
-            break;
-        }
-        const std::uint64_t expectedBytes =
-            static_cast<std::uint64_t>(frameCount)
-            * result.format.channelCount;
-        if (
-            expectedBytes
-            > std::numeric_limits<std::uint64_t>::max()
-                / sizeof(float)
-        ) {
-            offset = blockStart;
-            result.discardedInvalidTail = true;
-            break;
-        }
-        const std::uint64_t expectedPayloadBytes =
-            expectedBytes * sizeof(float);
-        if (payloadBytes != expectedPayloadBytes) {
-            offset = blockStart;
-            result.discardedInvalidTail = true;
-            break;
-        }
-        const auto payload = std::span<const std::byte> {
-            bytes.data() + static_cast<std::ptrdiff_t>(offset),
-            payloadBytes,
-        };
-        if (crc32(payload) != expectedCrc) {
-            offset = blockStart;
-            result.discardedInvalidTail = true;
-            break;
-        }
-        const std::size_t previousSamples =
-            result.interleavedSamples.size();
-        const std::size_t addedSamples =
-            payloadBytes / sizeof(float);
-        result.interleavedSamples.resize(
-            previousSamples + addedSamples
+    if (scan.frameCount
+        > std::numeric_limits<std::uint64_t>::max()
+            / scan.format.channelCount) {
+        result.error = "recording sample count overflows";
+        return result;
+    }
+    const std::uint64_t sampleCount =
+        scan.frameCount * scan.format.channelCount;
+    if (sampleCount > std::numeric_limits<std::size_t>::max()) {
+        result.error = "recording is too large to materialize";
+        return result;
+    }
+    result.interleavedSamples.resize(
+        static_cast<std::size_t>(sampleCount)
+    );
+
+    auto reader = RecoverableRecordingReader::create(
+        path,
+        result.error
+    );
+    if (reader == nullptr) {
+        return result;
+    }
+    std::size_t sampleOffset = 0U;
+    for (std::uint64_t block = 0U; block < scan.blockCount; ++block) {
+        std::uint32_t frames = 0U;
+        const auto status = reader->readNextBlock(
+            std::span<float> {result.interleavedSamples}.subspan(
+                sampleOffset
+            ),
+            frames,
+            result.error
         );
-        std::memcpy(
-            result.interleavedSamples.data()
-                + static_cast<std::ptrdiff_t>(previousSamples),
-            payload.data(),
-            payload.size()
-        );
-        result.frameCount += frameCount;
-        ++result.blockCount;
-        ++expectedSequence;
-        offset += payloadBytes;
+        if (status != RecordingBlockReadStatus::block) {
+            if (result.error.empty()) {
+                result.error =
+                    "recording changed during materialization";
+            }
+            return result;
+        }
+        sampleOffset += static_cast<std::size_t>(frames)
+            * scan.format.channelCount;
     }
     return result;
 }

@@ -40,6 +40,7 @@ add_library(iramix_core STATIC
     src/audio/RenderPlanExecutor.cpp
     src/ipc/Protocol.cpp
     src/platform/Platform.cpp
+    src/persistence/DiskAudioWorkers.cpp
     src/persistence/Persistence.cpp
     src/realtime/Audit.cpp
 )
@@ -169,6 +170,7 @@ if(IRAMIX_BUILD_TESTS)
 
     add_executable(
         iramix_persistence_tests
+        apps/audio-probe/AllocationHooks.cpp
         tests/PersistenceTests.cpp
     )
     target_link_libraries(
