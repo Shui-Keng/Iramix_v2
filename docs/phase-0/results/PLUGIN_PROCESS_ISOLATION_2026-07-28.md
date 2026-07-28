@@ -110,6 +110,27 @@ construct that compiles and runs on the one local toolchain and fails
 elsewhere, after `std::uintmax_t` on macOS and Windows SDK header order on
 MSVC. The pattern is recorded in `CLAUDE.md`.
 
+## Correction: the healthy-path assertion was a scheduler test
+
+This document originally reported `deadline_misses=0` over 500 blocks and
+the suite asserted `processed == 500`. On 2026-07-28 that assertion failed
+on a hosted macOS runner — on a **documentation-only commit**, with the
+same code that had passed macOS minutes earlier. It was therefore the
+assertion that was wrong, not the bridge.
+
+The reason is already stated in this document's evidence boundary: the
+deadline bounds the *spin*, not preemption. A host thread that is not
+scheduled cannot observe its own expiry, and on a shared runner that is
+outside the bridge's control. Requiring zero misses made the suite fail
+when the CI machine was busy.
+
+The test now asserts what must hold regardless of scheduling — the healthy
+path is the common case (≥ 90%), every missed block emits silence, and no
+block waits unboundedly — and reports the measured `processed` and
+`deadline_misses` through the counter line instead of asserting them. The
+zero-miss figure above remains a local Release measurement, which is all it
+ever was.
+
 ## Evidence boundary
 
 This proves the bridge contract — bounded wait, silence on failure, host

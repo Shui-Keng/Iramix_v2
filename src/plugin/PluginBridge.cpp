@@ -314,15 +314,26 @@ struct PluginBridge::Impl final {
     // Unlike processBlock this may sleep, because state transfer runs on
     // the control thread. It is still bounded: a plugin that never answers
     // delays one save or one load and is then given up on.
+    //
+    // A responsive plugin answers in microseconds, so a brief yield window
+    // comes first. Sleeping immediately would charge every restore the
+    // host's timer granularity instead — on Windows that is ~15 ms, which
+    // is three orders of magnitude above the actual transfer.
     [[nodiscard]] bool awaitState(const std::uint32_t sequence) noexcept {
-        const auto expiry =
-            std::chrono::steady_clock::now() + config.stateDeadline;
+        const auto started = std::chrono::steady_clock::now();
+        const auto expiry = started + config.stateDeadline;
+        const auto spinUntil = started + std::chrono::microseconds {500};
         while (control->stateCompletion.load(std::memory_order_acquire)
             != sequence) {
-            if (std::chrono::steady_clock::now() >= expiry) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= expiry) {
                 return false;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds {1});
+            if (now >= spinUntil) {
+                std::this_thread::sleep_for(std::chrono::milliseconds {1});
+            } else {
+                std::this_thread::yield();
+            }
         }
         return true;
     }

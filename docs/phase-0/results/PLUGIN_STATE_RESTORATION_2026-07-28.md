@@ -58,30 +58,42 @@ Windows-only per accepted risk R-13.
 
 ```text
 Plugin state restoration: state_bytes=272, payload_bytes=256,
-schema_version=4, restored_gain=0.25, restore_ms=0.0087,
-capture_ms=0.0308, capture_identical=1, rejections=0, timeouts=0
+schema_version=4, restored_gain=0.25, restore_ms=0.0088,
+capture_ms=0.0227, capture_identical=1, rejections=0, timeouts=0
 
 Plugin state rejections: no_region=1, before_start=2, oversized=1,
 corrupt=1, after_stop=1, previous_state_retained=1
 
-Plugin state on dead plugin: state_deadline_ms=100, observed_ms=108.156,
+Plugin state on dead plugin: state_deadline_ms=100, observed_ms=109.73,
 timeouts=1, captured_bytes=0
 ```
 
-The bridge counters from the first slice are unchanged in shape and still
-pass on the same run:
+The bridge counters from the first slice still pass on the same run:
 
 ```text
-Plugin bridge healthy: blocks=500, frames=256, channels=2,
-round_trip_p50_ms=0.0042, round_trip_p95_ms=0.0055,
-round_trip_p99_ms=0.0158, round_trip_max_ms=1.0792, deadline_misses=0
+Plugin bridge healthy: blocks=500, frames=256, channels=2, processed=500,
+round_trip_p50_ms=0.0033, round_trip_p95_ms=0.0065,
+round_trip_p99_ms=0.0154, round_trip_max_ms=0.9392, deadline_misses=0
 ```
 
 `restore_ms` and `capture_ms` are single observations, not distributions.
 They are reported to show the operation is in the tens of microseconds for
 a 272-byte blob against an awake plugin — not as a percentile claim, and
 not as a bound. The bound is `stateDeadline`, and the third line is what
-demonstrates it.
+demonstrates it. Across three consecutive Release runs `restore_ms` was
+0.0088, 0.0174, and 0.217; the spread is scheduling, not blob size.
+
+### The wait strategy those numbers depend on
+
+The first version of `awaitState()` slept 1 ms between polls, which looked
+harmless and was not: Windows' timer granularity is roughly 15 ms, so a
+restore that transfers 272 bytes in microseconds was charged **17 ms** on
+one run and 0.009 ms on the next, depending purely on whether the first
+poll happened to win the race. The wait now yields for 500 µs before it
+begins sleeping, which puts a responsive plugin in the tens of
+microseconds while a stalled one still reaches its deadline without
+burning a core. This is a control-thread path; `processBlock()` is
+unchanged and still spins.
 
 ## What the session contributes
 
