@@ -28,7 +28,7 @@ staging file, performs the durable flush and atomic replacement, then publishes
 
 ## Session schema
 
-The current Phase 0 session schema is v2. It contains:
+This result introduced Phase 0 session schema v2. It contains:
 
 - non-zero session revision;
 - sample rate and tempo;
@@ -123,3 +123,7 @@ It does not prove:
 - autosave policy, coalescing, backup retention, or free-space handling;
 - recovery under OS power loss or storage hardware failure;
 - live Java UI and engine-session integration.
+
+Schema v3 and the first synthetic reference-session benchmark supersede the
+current-schema scope in this result:
+[`REFERENCE_SESSION_SCHEMA_V3_2026-07-28.md`](REFERENCE_SESSION_SCHEMA_V3_2026-07-28.md).

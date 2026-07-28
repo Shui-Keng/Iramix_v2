@@ -115,7 +115,8 @@ preserved committed snapshots across injected replacement failures, repaired a
 partial command-journal tail, and recovered two durably flushed recording
 blocks after a child process exited at an injected crash point. Two durable
 journal appends took 6 ms in the local MSVC run. Large-file streaming,
-reference-project open time, and the UI-stall budget remain unmeasured.
+reference-project open time, and the UI-stall budget remained unmeasured in
+that initial slice.
 
 The follow-up
 [`bounded disk-audio worker screening`](results/DISK_AUDIO_WORKERS_2026-07-28.md)
@@ -137,6 +138,18 @@ opened at revision 200, and an injected failure produced an explicit rejection.
 This meets the submit-call portion of the below-16-ms UI-stall budget. It does
 not include session serialization, IPC, or durable completion latency, so the
 complete normal-save UI budget remains open.
+
+The
+[`reference session schema-v3 screening`](results/REFERENCE_SESSION_SCHEMA_V3_2026-07-28.md)
+uses 200 tracks, 2,000 clips, 199 routes, 40 automation lanes, and 40,000
+automation points. The 652,772-byte local MSVC Release project recorded
+serialize p50 `3.4328 ms`, p95 `17.1632 ms`, p99/max `21.4607 ms`; combined
+project-envelope load plus schema decode recorded p50 `14.7268 ms`, p95
+`44.0381 ms`, and p99/max `61.7546 ms` over 20 iterations using nearest-rank
+percentiles. This passes the five-second open target for the synthetic,
+warm-local corpus. It is not final cold-cache/reference-hardware evidence, and
+the serialization tail exceeding 16 ms confirms serialization must remain off
+the UI thread.
 
 ## Plugin bridge
 

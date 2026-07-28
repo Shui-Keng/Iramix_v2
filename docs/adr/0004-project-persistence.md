@@ -36,8 +36,11 @@ single crash capable of destroying otherwise valid work.
   replacement return successfully. Pipeline saturation and invalid revisions
   are rejected synchronously.
 - Session documents use stable non-zero entity IDs and a schema version
-  independent from the project envelope. The current Phase 0 schema is v2;
-  v1 migration supplies deterministic defaults for fields introduced in v2.
+  independent from the project envelope. The current Phase 0 schema is v3.
+  V1 and v2 migrations supply deterministic defaults or empty collections for
+  fields introduced later.
+- Schema v3 adds clips, routes, and automation lanes with validated stable
+  references. Export to v1/v2 is rejected when it would discard v3 entities.
 - Project, journal, recording, and IPC schema versions remain independent.
 - No persistence operation may run on an audio callback.
 
@@ -73,8 +76,9 @@ legacy `recoverRecording` helper still materializes samples for tests and
 small imports, while production streaming uses `scanRecording` and
 `RecoverableRecordingReader`.
 
-The project save call now runs behind a bounded worker pipeline, and the first
-stable-ID session DTO plus v1-to-v2 migration fixture is implemented. Session
+The project save call now runs behind a bounded worker pipeline, and the
+stable-ID session DTO plus v1/v2-to-v3 migration fixtures are implemented.
+Session
 serialization is still prepared before submission; submit-latency evidence
 therefore does not include serialization cost.
 

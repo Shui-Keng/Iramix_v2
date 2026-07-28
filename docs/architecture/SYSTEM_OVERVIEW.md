@@ -172,11 +172,14 @@ worker. A pipeline slot is retained until the control thread consumes its
 completion. The worker publishes `committed` only after durable staging and
 atomic replacement succeed.
 
-The Phase 0 session DTO uses stable IDs and an independently versioned binary
-schema. Schema v2 stores revision, sample rate, tempo, track type, gain, color,
-and name; the v1 migration deterministically supplies the fields added in v2.
-Runtime audio nodes are not serialized.
+The Phase 0 session DTO uses globally unique stable entity IDs and an
+independently versioned binary schema. Schema v3 stores revision, sample rate,
+tempo, tracks, clips, routing, and automation. References are validated on
+save and load. V1/v2 migrations supply deterministic defaults and empty v3
+collections; lossy legacy export is rejected. Runtime audio nodes are not
+serialized.
 
 Disk and save workers are not yet connected to the full live session/device
 flow. Serialization still occurs before save submission. Complete DAW session
-coverage, final media conversion, and reference-project timing remain pending.
+coverage, final media conversion, cold-cache/reference-hardware timing, and
+media/plugin restoration remain pending.

@@ -47,3 +47,6 @@ trips, migration drills, and reference-project benchmarks pass. The first
 stable-ID session round trip, v1-to-v2 migration fixture, bounded async-save
 pipeline, and failure-to-rejection ordering are now covered by
 [`ASYNC_SAVE_SESSION_MIGRATION_2026-07-28.md`](results/ASYNC_SAVE_SESSION_MIGRATION_2026-07-28.md).
+Schema-v3 clip/routing/automation references, v1/v2 migrations, lossy-export
+rejection, and the first synthetic reference-session benchmark are covered by
+[`REFERENCE_SESSION_SCHEMA_V3_2026-07-28.md`](results/REFERENCE_SESSION_SCHEMA_V3_2026-07-28.md).

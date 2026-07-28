@@ -14,7 +14,7 @@ three-OS build proof.
 | Audio files | To be selected | WAV/AIFF/FLAC read/write | Open |
 | Sample-rate conversion | To be selected | Boundary conversion | Open |
 | FFT | To be selected | Spectral analysis and DSP | Open |
-| Serialization | SQLite plus schema layer candidate | Session persistence | Open |
+| Serialization | Deterministic binary schema-v3 spike implemented; SQLite plus schema layer remains a production candidate | Session persistence | Open |
 | Windows audio | Steinberg ASIO SDK 2.3 | Optional external Phase 0 host probe | Proprietary selected; signing pending |
 | Linux audio | System JACK client API | Native Phase 0 callback probe | Spike-only; version/license pin pending |
 | Plugin API | CLAP | Plugin hosting | Planned |

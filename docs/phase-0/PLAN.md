@@ -145,7 +145,7 @@ Exit evidence:
 | P0-009 | User interviews | Not started |
 | P0-010 | Dependency/license inventory | Not started |
 | P0-011 | Immutable real-time graph core | Windows production path, 5,001-publication sanitizer edit-storm, cross-block ramps, sample-rate modulation, and denormal protection verified; other backends and final soak pending |
-| P0-012 | Disk and session resilience | Atomic recovery, bounded disk workers, async project saves, stable-ID session schema v2, v1 migration, and project round-trip verified on three-OS CI/sanitizers; complete session coverage, live integration, serialization benchmark, and reference benchmarks pending |
+| P0-012 | Disk and session resilience | Atomic recovery, bounded disk/save workers, schema v3 stable-ID clips/routing/automation, v1/v2 migrations, lossy-export rejection, and a 200-track/2,000-clip/40-lane benchmark verified on three-OS CI/sanitizers; full session coverage, live integration, cold reference-hardware benchmarks, and media/plugin restoration pending |
 
 ## Definition of done
 
