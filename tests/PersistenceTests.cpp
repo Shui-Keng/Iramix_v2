@@ -1,7 +1,9 @@
+#include "iramix/persistence/AsyncProjectSaver.hpp"
 #include "iramix/persistence/CommandJournal.hpp"
 #include "iramix/persistence/DiskAudioWorkers.hpp"
 #include "iramix/persistence/ProjectStore.hpp"
 #include "iramix/persistence/RecoverableRecording.hpp"
+#include "iramix/persistence/SessionDocument.hpp"
 #include "iramix/realtime/Audit.hpp"
 
 #include <algorithm>
@@ -13,6 +15,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
@@ -93,6 +96,18 @@ template <typename Predicate>
     return predicate();
 }
 
+[[nodiscard]] double percentileMilliseconds(
+    std::vector<double> values,
+    const double percentile
+) {
+    require(!values.empty(), "percentile input is non-empty");
+    std::sort(values.begin(), values.end());
+    const auto rank = static_cast<std::size_t>(
+        percentile * static_cast<double>(values.size() - 1U)
+    );
+    return values[rank];
+}
+
 void testAtomicProjectStore(const std::filesystem::path& root) {
     const auto project = root / "project" / "session.irpx";
     const auto first = bytesOf("session-revision-1");
@@ -168,6 +183,395 @@ void testAtomicProjectStore(const std::filesystem::path& root) {
     std::cout
         << "Atomic project store: committed_revisions=2, "
            "injected_failures=2, staging_recoveries=1\n";
+}
+
+void testSessionDocumentRoundTrip(
+    const std::filesystem::path& root
+) {
+    iramix::persistence::SessionDocument source;
+    source.revision = 42U;
+    source.sampleRate = 96'000U;
+    source.tempo = 137.5;
+    source.tracks = {
+        {
+            .stableId = 101U,
+            .type = iramix::persistence::SessionTrackType::audio,
+            .gain = 0.75F,
+            .color = 0xFF33'6699U,
+            .name = "Field recording",
+        },
+        {
+            .stableId = 205U,
+            .type =
+                iramix::persistence::SessionTrackType::instrument,
+            .gain = 1.0F,
+            .color = 0xFFAA'5500U,
+            .name = "Orchestra",
+        },
+        {
+            .stableId = 999U,
+            .type = iramix::persistence::SessionTrackType::master,
+            .gain = 0.9F,
+            .color = 0xFF22'2222U,
+            .name = "Master",
+        },
+    };
+
+    std::string error;
+    const auto currentBytes =
+        iramix::persistence::serializeSessionDocument(
+            source,
+            error
+        );
+    require(!currentBytes.empty(), error.c_str());
+    auto decoded =
+        iramix::persistence::deserializeSessionDocument(
+            currentBytes
+        );
+    require(decoded.ok(), decoded.error.c_str());
+    require(
+        decoded.sourceSchemaVersion
+                == iramix::persistence::currentSessionSchemaVersion
+            && !decoded.migrated
+            && decoded.document.revision == source.revision
+            && decoded.document.sampleRate == source.sampleRate
+            && decoded.document.tempo == source.tempo
+            && decoded.document.tracks.size()
+                == source.tracks.size()
+            && decoded.document.tracks[0].stableId == 101U
+            && decoded.document.tracks[0].name
+                == "Field recording"
+            && decoded.document.tracks[1].color
+                == 0xFFAA'5500U
+            && decoded.document.tracks[2].type
+                == iramix::persistence::SessionTrackType::master,
+        "current session schema round trips deterministically"
+    );
+
+    const auto legacyBytes =
+        iramix::persistence::serializeSessionDocument(
+            source,
+            error,
+            1U
+        );
+    require(!legacyBytes.empty(), error.c_str());
+    decoded =
+        iramix::persistence::deserializeSessionDocument(
+            legacyBytes
+        );
+    require(decoded.ok(), decoded.error.c_str());
+    require(
+        decoded.sourceSchemaVersion == 1U
+            && decoded.migrated
+            && decoded.document.sampleRate == 48'000U
+            && std::all_of(
+                decoded.document.tracks.begin(),
+                decoded.document.tracks.end(),
+                [](const auto& track) {
+                    return track.color == 0U;
+                }
+            ),
+        "schema v1 migrates sample rate and track color defaults"
+    );
+
+    const auto project = root / "session-round-trip.irpx";
+    require(
+        iramix::persistence::saveProjectSnapshot(
+            project,
+            currentBytes,
+            error
+        ),
+        error.c_str()
+    );
+    const auto loaded =
+        iramix::persistence::loadProjectSnapshot(project);
+    require(loaded.ok, loaded.error.c_str());
+    decoded =
+        iramix::persistence::deserializeSessionDocument(
+            loaded.payload
+        );
+    require(
+        decoded.ok()
+            && decoded.document.revision == 42U
+            && decoded.document.tracks.size() == 3U,
+        "session document round trips through project envelope"
+    );
+
+    auto unsupported = currentBytes;
+    unsupported[4] = std::byte {99U};
+    decoded =
+        iramix::persistence::deserializeSessionDocument(
+            unsupported
+        );
+    require(
+        !decoded.ok(),
+        "unknown future session schema is rejected"
+    );
+
+    auto duplicateIds = source;
+    duplicateIds.tracks[1].stableId =
+        duplicateIds.tracks[0].stableId;
+    require(
+        iramix::persistence::serializeSessionDocument(
+            duplicateIds,
+            error
+        ).empty(),
+        "duplicate stable session IDs are rejected"
+    );
+
+    std::cout
+        << "Session document: current_schema=2, tracks=3, "
+           "stable_ids=3, v1_migrations=1, "
+           "unknown_schemas_rejected=1, project_round_trips=1\n";
+}
+
+void testAsyncProjectSaver(
+    const std::filesystem::path& root
+) {
+    const auto project = root / "async-project.irpx";
+    std::string error;
+    require(
+        iramix::persistence::saveProjectSnapshot(
+            project,
+            bytesOf("committed-base"),
+            error
+        ),
+        error.c_str()
+    );
+
+    auto saver =
+        iramix::persistence::AsyncProjectSaver::create(
+            project,
+            2U,
+            error
+        );
+    require(saver != nullptr, error.c_str());
+    const auto failedPayload =
+        std::make_shared<const std::vector<std::byte>>(
+            bytesOf("must-not-commit")
+        );
+    const auto committedPayload =
+        std::make_shared<const std::vector<std::byte>>(
+            bytesOf("committed-async")
+        );
+    require(
+        saver->trySubmit(
+            1U,
+            failedPayload,
+            iramix::persistence::AtomicSaveFailurePoint::
+                afterStagingFlush
+        ) == iramix::persistence::ProjectSaveSubmitResult::accepted,
+        "first asynchronous save is accepted"
+    );
+    require(
+        saver->trySubmit(2U, committedPayload)
+            == iramix::persistence::ProjectSaveSubmitResult::accepted,
+        "second asynchronous save is accepted"
+    );
+    require(
+        saver->trySubmit(3U, committedPayload)
+            == iramix::persistence::ProjectSaveSubmitResult::full,
+        "asynchronous save pipeline reports saturation"
+    );
+    require(
+        saver->trySubmit(2U, committedPayload)
+            == iramix::persistence::ProjectSaveSubmitResult::
+                invalidRevision,
+        "asynchronous save rejects duplicate revisions"
+    );
+    iramix::persistence::ProjectSaveCompletion completion;
+    require(
+        !saver->tryPopCompletion(completion),
+        "save completion is absent before durable worker processing"
+    );
+    auto loaded = iramix::persistence::loadProjectSnapshot(project);
+    require(
+        loaded.ok && textOf(loaded.payload) == "committed-base",
+        "unprocessed requests cannot change the committed project"
+    );
+
+    require(saver->start(error), error.c_str());
+    saver->stop();
+    require(
+        saver->completionCount() == 2U
+            && saver->pendingSaveCount() == 0U,
+        "stop drains accepted asynchronous saves"
+    );
+    require(
+        saver->tryPopCompletion(completion)
+            && completion.revision == 1U
+            && completion.status
+                == iramix::persistence::
+                    ProjectSaveCompletionStatus::failed
+            && completion.detail[0] != '\0',
+        "injected save failure produces an explicit rejection"
+    );
+    require(
+        saver->tryPopCompletion(completion)
+            && completion.revision == 2U
+            && completion.status
+                == iramix::persistence::
+                    ProjectSaveCompletionStatus::committed
+            && completion.detail[0] == '\0',
+        "durable replacement produces the matching ACK"
+    );
+    require(
+        saver->outstandingCount() == 0U
+            && saver->acceptedCount() == 2U
+            && saver->rejectedCount() == 2U,
+        "request and completion accounting closes exactly"
+    );
+    loaded = iramix::persistence::loadProjectSnapshot(project);
+    require(
+        loaded.ok
+            && textOf(loaded.payload) == "committed-async",
+        "only the successful asynchronous revision commits"
+    );
+
+    const auto loadProject = root / "async-load.irpx";
+    auto loadSaver =
+        iramix::persistence::AsyncProjectSaver::create(
+            loadProject,
+            8U,
+            error
+        );
+    require(loadSaver != nullptr, error.c_str());
+    require(loadSaver->start(error), error.c_str());
+
+    constexpr std::uint64_t revisionCount = 200U;
+    std::vector<double> submitMilliseconds;
+    submitMilliseconds.reserve(revisionCount);
+    std::uint64_t committedCompletions = 0U;
+    for (
+        std::uint64_t revision = 1U;
+        revision <= revisionCount;
+        ++revision
+    ) {
+        iramix::persistence::SessionDocument document;
+        document.revision = revision;
+        document.tracks = {
+            {
+                .stableId = 1U,
+                .type =
+                    iramix::persistence::SessionTrackType::audio,
+                .gain = 1.0F,
+                .color = 0xFF44'6688U,
+                .name = "Latency fixture",
+            },
+        };
+        auto serialized =
+            iramix::persistence::serializeSessionDocument(
+                document,
+                error
+            );
+        require(!serialized.empty(), error.c_str());
+        const auto immutable =
+            std::make_shared<const std::vector<std::byte>>(
+                std::move(serialized)
+            );
+
+        for (;;) {
+            const auto started =
+                std::chrono::steady_clock::now();
+            const auto result = loadSaver->trySubmit(
+                revision,
+                immutable
+            );
+            const double elapsed =
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - started
+                ).count();
+            if (result
+                == iramix::persistence::
+                    ProjectSaveSubmitResult::accepted) {
+                submitMilliseconds.push_back(elapsed);
+                break;
+            }
+            require(
+                result
+                    == iramix::persistence::
+                        ProjectSaveSubmitResult::full,
+                "load save submission only backpressures when full"
+            );
+            while (loadSaver->tryPopCompletion(completion)) {
+                require(
+                    completion.status
+                        == iramix::persistence::
+                            ProjectSaveCompletionStatus::committed,
+                    completion.detail.data()
+                );
+                ++committedCompletions;
+            }
+            std::this_thread::yield();
+        }
+        while (loadSaver->tryPopCompletion(completion)) {
+            require(
+                completion.status
+                    == iramix::persistence::
+                        ProjectSaveCompletionStatus::committed,
+                completion.detail.data()
+            );
+            ++committedCompletions;
+        }
+    }
+    require(
+        waitUntil([&loadSaver, &completion, &committedCompletions] {
+            while (loadSaver->tryPopCompletion(completion)) {
+                require(
+                    completion.status
+                        == iramix::persistence::
+                            ProjectSaveCompletionStatus::committed,
+                    completion.detail.data()
+                );
+                ++committedCompletions;
+            }
+            return committedCompletions == revisionCount;
+        }),
+        "all load-test save completions arrive"
+    );
+    loadSaver->stop();
+
+    const double submitP50 = percentileMilliseconds(
+        submitMilliseconds,
+        0.50
+    );
+    const double submitP95 = percentileMilliseconds(
+        submitMilliseconds,
+        0.95
+    );
+    const double submitP99 = percentileMilliseconds(
+        submitMilliseconds,
+        0.99
+    );
+    const double submitMaximum = *std::max_element(
+        submitMilliseconds.begin(),
+        submitMilliseconds.end()
+    );
+    require(
+        submitP99 < 16.0,
+        "asynchronous save submit p99 stays below UI stall budget"
+    );
+    loaded = iramix::persistence::loadProjectSnapshot(loadProject);
+    require(loaded.ok, loaded.error.c_str());
+    const auto finalSession =
+        iramix::persistence::deserializeSessionDocument(
+            loaded.payload
+        );
+    require(
+        finalSession.ok()
+            && finalSession.document.revision == revisionCount,
+        "load-test final durable revision opens successfully"
+    );
+
+    std::cout
+        << "Async project saver: revisions=" << revisionCount
+        << ", capacity=8, committed_completions="
+        << committedCompletions
+        << ", submit_p50_ms=" << submitP50
+        << ", submit_p95_ms=" << submitP95
+        << ", submit_p99_ms=" << submitP99
+        << ", submit_max_ms=" << submitMaximum
+        << ", injected_failures=1, explicit_full_rejections=1\n";
 }
 
 void testCommandJournal(const std::filesystem::path& root) {
@@ -700,6 +1104,8 @@ int main(const int argc, char* argv[]) {
 
     TemporaryDirectory temporary;
     testAtomicProjectStore(temporary.path());
+    testSessionDocumentRoundTrip(temporary.path());
+    testAsyncProjectSaver(temporary.path());
     testCommandJournal(temporary.path());
     testRecoverableRecording(
         std::filesystem::absolute(argv[0]),

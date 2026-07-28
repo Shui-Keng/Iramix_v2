@@ -40,8 +40,10 @@ add_library(iramix_core STATIC
     src/audio/RenderPlanExecutor.cpp
     src/ipc/Protocol.cpp
     src/platform/Platform.cpp
+    src/persistence/AsyncProjectSaver.cpp
     src/persistence/DiskAudioWorkers.cpp
     src/persistence/Persistence.cpp
+    src/persistence/SessionDocument.cpp
     src/realtime/Audit.cpp
 )
 
