@@ -53,6 +53,13 @@ jobs:
           IRAMIX_ENGINE_PROBE: ${{ github.workspace }}/${{ matrix.engine_probe }}
 
   sanitizers:
+    strategy:
+      fail-fast: false
+      matrix:
+        preset:
+          - sanitizers
+          - thread-sanitizer
+
     runs-on: ubuntu-latest
 
     steps:
@@ -61,11 +68,11 @@ jobs:
       - name: Install JACK development package
         run: sudo apt-get update && sudo apt-get install -y libjack-jackd2-dev
 
-      - name: Configure ASan and UBSan
-        run: cmake --preset sanitizers
+      - name: Configure sanitizer
+        run: cmake --preset ${{ matrix.preset }}
 
-      - name: Build ASan and UBSan
-        run: cmake --build --preset sanitizers
+      - name: Build sanitizer
+        run: cmake --build --preset ${{ matrix.preset }}
 
-      - name: Test ASan and UBSan
-        run: ctest --preset sanitizers
+      - name: Test sanitizer
+        run: ctest --preset ${{ matrix.preset }} --verbose

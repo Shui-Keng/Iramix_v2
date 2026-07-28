@@ -13,6 +13,11 @@ option(
     "Enable AddressSanitizer and UndefinedBehaviorSanitizer"
     OFF
 )
+option(
+    IRAMIX_ENABLE_THREAD_SANITIZER
+    "Enable ThreadSanitizer"
+    OFF
+)
 set(
     IRAMIX_ASIO_SDK_PATH
     ""
