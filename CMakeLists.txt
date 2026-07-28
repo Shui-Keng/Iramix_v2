@@ -40,6 +40,7 @@ add_library(iramix_core STATIC
     src/audio/RenderPlanExecutor.cpp
     src/ipc/Protocol.cpp
     src/platform/Platform.cpp
+    src/persistence/Persistence.cpp
     src/realtime/Audit.cpp
 )
 
@@ -164,6 +165,21 @@ if(IRAMIX_BUILD_TESTS)
     add_test(
         NAME iramix.plan_swap
         COMMAND iramix_plan_swap_tests
+    )
+
+    add_executable(
+        iramix_persistence_tests
+        tests/PersistenceTests.cpp
+    )
+    target_link_libraries(
+        iramix_persistence_tests
+        PRIVATE
+            Iramix::Core
+    )
+    iramix_set_warnings(iramix_persistence_tests)
+    add_test(
+        NAME iramix.persistence
+        COMMAND iramix_persistence_tests
     )
 
     add_test(
