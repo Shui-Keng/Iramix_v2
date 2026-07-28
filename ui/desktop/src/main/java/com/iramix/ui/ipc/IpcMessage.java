@@ -22,7 +22,9 @@ public record IpcMessage(
         PING(3),
         ACKNOWLEDGEMENT(4),
         SHUTDOWN(5),
-        REJECT(6);
+        REJECT(6),
+        SAVE_SESSION(7),
+        POLL_SAVE_COMPLETION(8);
 
         private final int wireValue;
 

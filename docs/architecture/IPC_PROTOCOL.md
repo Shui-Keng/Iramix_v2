@@ -61,9 +61,23 @@ Version 1 message type values:
 | 4 | `ACK` |
 | 5 | `SHUTDOWN` |
 | 6 | `REJECT` |
+| 7 | `SAVE_SESSION` |
+| 8 | `POLL_SAVE_COMPLETION` |
 
-The executable mode `iramix_engine_probe --ipc-stdio` currently validates
-`HELLO/WELCOME`, sequenced `PING/ACK`, and clean `SHUTDOWN/ACK`.
+The executable mode `iramix_engine_probe --ipc-stdio` validates
+`HELLO/WELCOME`, sequenced `PING/ACK`, and clean `SHUTDOWN/ACK`. When launched
+with `--project <path>`, it also advertises `save_session` and
+`poll_save_completion`.
+
+`SAVE_SESSION` returns an immediate ACK only after the immutable snapshot is
+accepted by the bounded native pipeline. It does not claim durability.
+`POLL_SAVE_COMPLETION` returns `none`, `committed`, or `failed` with the
+matching session revision. `committed` is published only after serialization,
+durable staging, and atomic replacement complete. Phase 0 uses polling to keep
+the request/response pipe simple; Phase 1 may replace it with asynchronous
+engine events without changing the durability boundary.
+The Java UI-facing save API performs that wait on a virtual thread and returns
+a `CompletableFuture`; it must not block the AWT event thread.
 
 ## Phase 0 load-test evidence
 
@@ -103,6 +117,8 @@ acts as the regression check.
 - `SNAPSHOT`: immutable session or view-model snapshot.
 - `TELEMETRY`: bounded, droppable meters and performance counters.
 - `ENGINE_STATE`: starting, ready, suspended, recovering, or shutting down.
+- `SAVE_SESSION`: enqueue one immutable, revision-matched session snapshot.
+- `POLL_SAVE_COMPLETION`: consume the oldest durable save completion.
 
 ## Ordering and back-pressure
 

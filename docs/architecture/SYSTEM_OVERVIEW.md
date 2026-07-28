@@ -105,6 +105,8 @@ separate bounded queue; it may drop under saturation, with every drop counted.
 - Persist project commands, immutable snapshots, and backups.
 - Publish durable project-save ACK/REJECT records through a bounded pipeline;
   pipeline saturation is an explicit control-thread outcome.
+- Validate and serialize immutable session snapshots on the save worker, not
+  on the Java UI or C++ command-dispatch thread.
 
 ## Platform boundaries
 
@@ -167,10 +169,12 @@ SPSC queues whose callback-facing operations perform copies plus lock-free
 atomic publication only. Filesystem and durable-flush work runs on disk worker
 threads.
 
-Project snapshots can be submitted as immutable byte payloads to a bounded save
-worker. A pipeline slot is retained until the control thread consumes its
-completion. The worker publishes `committed` only after durable staging and
-atomic replacement succeed.
+Project snapshots can be submitted either as immutable byte payloads or as
+immutable session documents to bounded save workers. The session worker
+performs validation and schema serialization before durable staging. A
+pipeline slot is retained until the control thread consumes its completion.
+The worker publishes `committed` only after serialization, durable staging,
+and atomic replacement succeed.
 
 The Phase 0 session DTO uses globally unique stable entity IDs and an
 independently versioned binary schema. Schema v3 stores revision, sample rate,
@@ -179,7 +183,8 @@ save and load. V1/v2 migrations supply deterministic defaults and empty v3
 collections; lossy legacy export is rejected. Runtime audio nodes are not
 serialized.
 
-Disk and save workers are not yet connected to the full live session/device
-flow. Serialization still occurs before save submission. Complete DAW session
+The Java/C++ Phase 0 probe now exercises revisioned save acceptance and durable
+completion through IPC. Its native snapshot is still a minimal engine-probe
+fixture rather than the full mutable DAW session. Complete DAW session
 coverage, final media conversion, cold-cache/reference-hardware timing, and
 media/plugin restoration remain pending.

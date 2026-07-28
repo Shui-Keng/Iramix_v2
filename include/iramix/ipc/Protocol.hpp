@@ -17,6 +17,8 @@ enum class MessageType : std::uint16_t {
     acknowledgement = 4U,
     shutdown = 5U,
     reject = 6U,
+    saveSession = 7U,
+    pollSaveCompletion = 8U,
 };
 
 struct Message {

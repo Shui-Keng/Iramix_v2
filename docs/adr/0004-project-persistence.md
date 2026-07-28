@@ -32,6 +32,9 @@ single crash capable of destroying otherwise valid work.
 - Project saves use a bounded single-producer pipeline. Each slot owns its
   immutable payload reference from submission through durable completion, so
   an ACK/REJECT cannot be dropped independently from its request.
+- Session saves transfer an immutable document reference at submission.
+  Validation, schema serialization, project-envelope construction, filesystem
+  calls, and durable flushes run on the save worker.
 - A committed completion is published only after the staging flush and atomic
   replacement return successfully. Pipeline saturation and invalid revisions
   are rejected synchronously.
@@ -65,6 +68,8 @@ File durability uses `_commit` on Windows and `fsync` on POSIX.
 - Current-schema round trips and every retained legacy fixture migrate forward.
 - Large-file streaming, reference-project open time, and UI-stall budgets pass
   independently.
+- Java/C++ save acceptance is distinct from durable completion and both carry
+  the matching session revision.
 
 ## Initial evidence
 
@@ -76,12 +81,13 @@ legacy `recoverRecording` helper still materializes samples for tests and
 small imports, while production streaming uses `scanRecording` and
 `RecoverableRecordingReader`.
 
-The project save call now runs behind a bounded worker pipeline, and the
-stable-ID session DTO plus v1/v2-to-v3 migration fixtures are implemented.
-Session
-serialization is still prepared before submission; submit-latency evidence
-therefore does not include serialization cost.
+The project save call now runs behind bounded byte-payload and session-document
+worker pipelines. The stable-ID session DTO plus v1/v2-to-v3 migration fixtures
+are implemented. The session-document pipeline performs serialization on its
+worker and reports separate serialization and durable-save timing.
 
-Final media conversion, complete DAW session coverage, live engine integration,
-full-scale large-recording timing, and reference-project open measurements
+The Java/C++ probe exercises save acceptance and durable completion, but it
+still constructs a minimal native fixture rather than saving the production
+mutable DAW session. Final media conversion, complete DAW session coverage,
+full-scale large-recording timing, and cold reference-project measurements
 remain pending, so this ADR remains proposed.

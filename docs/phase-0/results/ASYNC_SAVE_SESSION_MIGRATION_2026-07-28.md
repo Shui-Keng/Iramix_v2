@@ -127,3 +127,6 @@ It does not prove:
 Schema v3 and the first synthetic reference-session benchmark supersede the
 current-schema scope in this result:
 [`REFERENCE_SESSION_SCHEMA_V3_2026-07-28.md`](REFERENCE_SESSION_SCHEMA_V3_2026-07-28.md).
+Background serialization and the first Java/C++ durable-save path supersede
+the pre-serialized/live-integration boundary:
+[`BACKGROUND_SESSION_SAVE_IPC_2026-07-28.md`](BACKGROUND_SESSION_SAVE_IPC_2026-07-28.md).

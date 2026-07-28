@@ -50,3 +50,9 @@ pipeline, and failure-to-rejection ordering are now covered by
 Schema-v3 clip/routing/automation references, v1/v2 migrations, lossy-export
 rejection, and the first synthetic reference-session benchmark are covered by
 [`REFERENCE_SESSION_SCHEMA_V3_2026-07-28.md`](results/REFERENCE_SESSION_SCHEMA_V3_2026-07-28.md).
+Background session serialization, revisioned Java/C++ save acceptance,
+ordered durable completion, explicit saturation, and separate serialization
+and save-worker timings are covered by
+[`BACKGROUND_SESSION_SAVE_IPC_2026-07-28.md`](results/BACKGROUND_SESSION_SAVE_IPC_2026-07-28.md).
+R-06 remains open until the production session owns the saved snapshot and the
+remaining cold-storage, power-loss, backup, and complete-state drills pass.

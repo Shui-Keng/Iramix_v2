@@ -1,4 +1,5 @@
 #include "iramix/persistence/AsyncProjectSaver.hpp"
+#include "iramix/persistence/AsyncSessionSaver.hpp"
 #include "iramix/persistence/CommandJournal.hpp"
 #include "iramix/persistence/DiskAudioWorkers.hpp"
 #include "iramix/persistence/ProjectStore.hpp"
@@ -904,6 +905,323 @@ void testReferenceProjectBenchmark(
         << ", truncated_projects_rejected=1\n";
 }
 
+void testAsyncSessionSaver(
+    const std::filesystem::path& root
+) {
+    const auto project = root / "async-session.irpx";
+    std::string error;
+    auto saver =
+        iramix::persistence::AsyncSessionSaver::create(
+            project,
+            3U,
+            error
+        );
+    require(saver != nullptr, error.c_str());
+
+    iramix::persistence::SessionDocument invalid;
+    invalid.revision = 1U;
+    invalid.tracks.push_back({
+        .stableId = 0U,
+        .type = iramix::persistence::SessionTrackType::audio,
+        .gain = 1.0F,
+        .color = 0U,
+        .name = "Invalid zero ID",
+    });
+    auto invalidSnapshot =
+        std::make_shared<const iramix::persistence::SessionDocument>(
+            std::move(invalid)
+        );
+
+    iramix::persistence::SessionDocument failed;
+    failed.revision = 2U;
+    failed.tracks.push_back({
+        .stableId = 1U,
+        .type = iramix::persistence::SessionTrackType::audio,
+        .gain = 1.0F,
+        .color = 0U,
+        .name = "Injected failure",
+    });
+    auto failedSnapshot =
+        std::make_shared<const iramix::persistence::SessionDocument>(
+            std::move(failed)
+        );
+
+    iramix::persistence::SessionDocument committed;
+    committed.revision = 3U;
+    committed.tracks.push_back({
+        .stableId = 1U,
+        .type = iramix::persistence::SessionTrackType::audio,
+        .gain = 0.75F,
+        .color = 0xFF44'6688U,
+        .name = "Committed session",
+    });
+    auto committedSnapshot =
+        std::make_shared<const iramix::persistence::SessionDocument>(
+            std::move(committed)
+        );
+
+    require(
+        saver->trySubmit(1U, invalidSnapshot)
+            == iramix::persistence::ProjectSaveSubmitResult::accepted,
+        "invalid session is accepted for background validation"
+    );
+    require(
+        saver->trySubmit(
+            2U,
+            failedSnapshot,
+            iramix::persistence::AtomicSaveFailurePoint::
+                afterStagingFlush
+        ) == iramix::persistence::ProjectSaveSubmitResult::accepted,
+        "failure-injected session is accepted"
+    );
+    require(
+        saver->trySubmit(3U, committedSnapshot)
+            == iramix::persistence::ProjectSaveSubmitResult::accepted,
+        "valid session is accepted"
+    );
+    require(
+        saver->trySubmit(4U, committedSnapshot)
+            == iramix::persistence::ProjectSaveSubmitResult::
+                invalidRevision,
+        "submission revision must match immutable snapshot revision"
+    );
+
+    auto fourth = std::make_shared<iramix::persistence::SessionDocument>(
+        *committedSnapshot
+    );
+    fourth->revision = 4U;
+    require(
+        saver->trySubmit(4U, fourth)
+            == iramix::persistence::ProjectSaveSubmitResult::full,
+        "session pipeline reports explicit saturation"
+    );
+    require(saver->start(error), error.c_str());
+    saver->stop();
+
+    iramix::persistence::SessionSaveCompletion completion;
+    require(
+        saver->tryPopCompletion(completion)
+            && completion.revision == 1U
+            && completion.status
+                == iramix::persistence::
+                    ProjectSaveCompletionStatus::failed
+            && completion.serializedBytes == 0U
+            && completion.detail[0] != '\0',
+        "background serialization failure produces revisioned reject"
+    );
+    require(
+        saver->tryPopCompletion(completion)
+            && completion.revision == 2U
+            && completion.status
+                == iramix::persistence::
+                    ProjectSaveCompletionStatus::failed
+            && completion.serializedBytes != 0U
+            && completion.durableSaveNanoseconds != 0U
+            && completion.detail[0] != '\0',
+        "durable write failure produces revisioned reject"
+    );
+    require(
+        saver->tryPopCompletion(completion)
+            && completion.revision == 3U
+            && completion.status
+                == iramix::persistence::
+                    ProjectSaveCompletionStatus::committed
+            && completion.serializedBytes != 0U
+            && completion.serializationNanoseconds != 0U
+            && completion.durableSaveNanoseconds != 0U
+            && completion.detail[0] == '\0',
+        "successful background serialization and save produce ACK"
+    );
+    require(
+        saver->outstandingCount() == 0U
+            && saver->acceptedCount() == 3U
+            && saver->rejectedCount() == 2U,
+        "session save accounting closes exactly"
+    );
+
+    auto loaded = iramix::persistence::loadProjectSnapshot(project);
+    require(loaded.ok, loaded.error.c_str());
+    const auto decoded =
+        iramix::persistence::deserializeSessionDocument(
+            loaded.payload
+        );
+    require(
+        decoded.ok()
+            && decoded.document.revision == 3U
+            && decoded.document.tracks[0].name
+                == "Committed session",
+        "latest successful session revision is durable"
+    );
+
+    constexpr std::uint64_t revisionCount = 20U;
+    const auto loadProject = root / "async-session-load.irpx";
+    auto loadSaver =
+        iramix::persistence::AsyncSessionSaver::create(
+            loadProject,
+            4U,
+            error
+        );
+    require(loadSaver != nullptr, error.c_str());
+    require(loadSaver->start(error), error.c_str());
+
+    const auto reference = makeReferenceSession();
+    std::vector<double> submitMilliseconds;
+    std::vector<double> serializationMilliseconds;
+    std::vector<double> durableSaveMilliseconds;
+    submitMilliseconds.reserve(revisionCount);
+    serializationMilliseconds.reserve(revisionCount);
+    durableSaveMilliseconds.reserve(revisionCount);
+    std::uint64_t committedCompletions = 0U;
+    std::uint64_t nextCompletionRevision = 1U;
+
+    const auto consumeCompletions = [&] {
+        while (loadSaver->tryPopCompletion(completion)) {
+            require(
+                completion.status
+                    == iramix::persistence::
+                        ProjectSaveCompletionStatus::committed,
+                completion.detail.data()
+            );
+            require(
+                completion.revision == nextCompletionRevision,
+                "session save completions preserve submission order"
+            );
+            require(
+                completion.serializedBytes > 600'000U,
+                "reference session serialization reports payload bytes"
+            );
+            serializationMilliseconds.push_back(
+                static_cast<double>(
+                    completion.serializationNanoseconds
+                ) / 1'000'000.0
+            );
+            durableSaveMilliseconds.push_back(
+                static_cast<double>(
+                    completion.durableSaveNanoseconds
+                ) / 1'000'000.0
+            );
+            ++nextCompletionRevision;
+            ++committedCompletions;
+        }
+    };
+
+    for (
+        std::uint64_t revision = 1U;
+        revision <= revisionCount;
+        ++revision
+    ) {
+        auto mutableSnapshot =
+            std::make_shared<iramix::persistence::SessionDocument>(
+                reference
+            );
+        mutableSnapshot->revision = revision;
+        const iramix::persistence::ImmutableSessionSnapshot snapshot =
+            std::move(mutableSnapshot);
+        for (;;) {
+            const auto started =
+                std::chrono::steady_clock::now();
+            const auto result =
+                loadSaver->trySubmit(revision, snapshot);
+            const double elapsed =
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - started
+                ).count();
+            if (result
+                == iramix::persistence::
+                    ProjectSaveSubmitResult::accepted) {
+                submitMilliseconds.push_back(elapsed);
+                break;
+            }
+            require(
+                result
+                    == iramix::persistence::
+                        ProjectSaveSubmitResult::full,
+                "reference session submission only backpressures"
+            );
+            consumeCompletions();
+            std::this_thread::yield();
+        }
+        consumeCompletions();
+    }
+    require(
+        waitUntil([&] {
+            consumeCompletions();
+            return committedCompletions == revisionCount;
+        }),
+        "all background session save completions arrive"
+    );
+    loadSaver->stop();
+
+    const double submitP50 = percentileMilliseconds(
+        submitMilliseconds,
+        0.50
+    );
+    const double submitP95 = percentileMilliseconds(
+        submitMilliseconds,
+        0.95
+    );
+    const double submitP99 = percentileMilliseconds(
+        submitMilliseconds,
+        0.99
+    );
+    const double serializeP50 = percentileMilliseconds(
+        serializationMilliseconds,
+        0.50
+    );
+    const double serializeP95 = percentileMilliseconds(
+        serializationMilliseconds,
+        0.95
+    );
+    const double serializeP99 = percentileMilliseconds(
+        serializationMilliseconds,
+        0.99
+    );
+    const double saveP50 = percentileMilliseconds(
+        durableSaveMilliseconds,
+        0.50
+    );
+    const double saveP95 = percentileMilliseconds(
+        durableSaveMilliseconds,
+        0.95
+    );
+    const double saveP99 = percentileMilliseconds(
+        durableSaveMilliseconds,
+        0.99
+    );
+    require(
+        submitP99 < 16.0,
+        "immutable snapshot handoff p99 stays below UI stall budget"
+    );
+
+    loaded = iramix::persistence::loadProjectSnapshot(loadProject);
+    require(loaded.ok, loaded.error.c_str());
+    const auto finalDecoded =
+        iramix::persistence::deserializeSessionDocument(
+            loaded.payload
+        );
+    require(
+        finalDecoded.ok()
+            && finalDecoded.document.revision == revisionCount,
+        "background worker durably commits the latest revision"
+    );
+
+    std::cout
+        << "Async session saver: revisions=" << revisionCount
+        << ", reference_tracks=200, reference_clips=2000, "
+           "reference_automation_points=40000"
+        << ", submit_p50_ms=" << submitP50
+        << ", submit_p95_ms=" << submitP95
+        << ", submit_p99_ms=" << submitP99
+        << ", serialize_worker_p50_ms=" << serializeP50
+        << ", serialize_worker_p95_ms=" << serializeP95
+        << ", serialize_worker_p99_ms=" << serializeP99
+        << ", durable_save_worker_p50_ms=" << saveP50
+        << ", durable_save_worker_p95_ms=" << saveP95
+        << ", durable_save_worker_p99_ms=" << saveP99
+        << ", ordered_completions=" << committedCompletions
+        << ", serialization_failures=1, injected_save_failures=1\n";
+}
+
 void testCommandJournal(const std::filesystem::path& root) {
     const auto path = root / "commands.irjc";
     iramix::persistence::CommandJournal journal {path};
@@ -1437,6 +1755,7 @@ int main(const int argc, char* argv[]) {
     testSessionDocumentRoundTrip(temporary.path());
     testAsyncProjectSaver(temporary.path());
     testReferenceProjectBenchmark(temporary.path());
+    testAsyncSessionSaver(temporary.path());
     testCommandJournal(temporary.path());
     testRecoverableRecording(
         std::filesystem::absolute(argv[0]),

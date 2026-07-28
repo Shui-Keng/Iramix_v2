@@ -4,6 +4,8 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -30,11 +32,22 @@ public final class EngineSession implements AutoCloseable {
     }
 
     public static EngineSession launch(Path executable) throws IOException {
+        return launch(executable, null);
+    }
+
+    public static EngineSession launch(
+        Path executable,
+        Path projectTarget
+    ) throws IOException {
         Objects.requireNonNull(executable, "executable");
-        var process = new ProcessBuilder(
-            executable.toAbsolutePath().toString(),
-            "--ipc-stdio"
-        )
+        var command = new java.util.ArrayList<String>();
+        command.add(executable.toAbsolutePath().toString());
+        command.add("--ipc-stdio");
+        if (projectTarget != null) {
+            command.add("--project");
+            command.add(projectTarget.toAbsolutePath().toString());
+        }
+        var process = new ProcessBuilder(command)
             .redirectError(ProcessBuilder.Redirect.INHERIT)
             .start();
         var executor = Executors.newThreadPerTaskExecutor(
@@ -92,6 +105,75 @@ public final class EngineSession implements AutoCloseable {
             throw new IOException("Engine returned an invalid PING response.");
         }
         return Duration.ofNanos(System.nanoTime() - started);
+    }
+
+    public synchronized SessionSaveResult saveSession(long revision)
+        throws IOException {
+        ensureOpen();
+        if (revision <= 0) {
+            throw new IllegalArgumentException(
+                "Session revision must be positive."
+            );
+        }
+        var request = new IpcMessage(
+            IpcProtocol.VERSION,
+            IpcMessage.Type.SAVE_SESSION,
+            nextSequence++,
+            "revision=" + revision
+        );
+        var response = exchange(request);
+        if (
+            response.type() != IpcMessage.Type.ACKNOWLEDGEMENT
+            || !response.payload().equals(
+                "accepted;revision=" + revision
+            )
+        ) {
+            throw new IOException(
+                "Engine returned invalid SAVE_SESSION ACK."
+            );
+        }
+
+        var deadline = System.nanoTime() + TIMEOUT.toNanos();
+        while (System.nanoTime() < deadline) {
+            var poll = new IpcMessage(
+                IpcProtocol.VERSION,
+                IpcMessage.Type.POLL_SAVE_COMPLETION,
+                nextSequence++,
+                ""
+            );
+            var completion = exchange(poll);
+            if (!"none".equals(completion.payload())) {
+                return parseSaveCompletion(
+                    completion.payload(),
+                    revision
+                );
+            }
+            try {
+                Thread.sleep(Duration.ofMillis(1));
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new IOException(
+                    "Interrupted while waiting for session save.",
+                    exception
+                );
+            }
+        }
+        throw new IOException("Session save completion timed out.");
+    }
+
+    public CompletableFuture<SessionSaveResult> saveSessionAsync(
+        long revision
+    ) {
+        return CompletableFuture.supplyAsync(
+            () -> {
+                try {
+                    return saveSession(revision);
+                } catch (IOException exception) {
+                    throw new CompletionException(exception);
+                }
+            },
+            Thread::startVirtualThread
+        );
     }
 
     @Override
@@ -220,5 +302,53 @@ public final class EngineSession implements AutoCloseable {
                 + response.payload()
                 + ")."
         );
+    }
+
+    private static SessionSaveResult parseSaveCompletion(
+        String payload,
+        long expectedRevision
+    ) throws IOException {
+        var fields = new java.util.HashMap<String, String>();
+        var parts = payload.split(";");
+        for (int index = 1; index < parts.length; ++index) {
+            var separator = parts[index].indexOf('=');
+            if (separator > 0) {
+                fields.put(
+                    parts[index].substring(0, separator),
+                    parts[index].substring(separator + 1)
+                );
+            }
+        }
+        if ("failed".equals(parts[0])) {
+            throw new IOException(
+                "Engine session save failed: "
+                    + fields.getOrDefault("detail", "unknown failure")
+            );
+        }
+        if (!"committed".equals(parts[0])) {
+            throw new IOException(
+                "Unknown session save completion: " + payload
+            );
+        }
+        try {
+            var revision = Long.parseLong(fields.get("revision"));
+            if (revision != expectedRevision) {
+                throw new IOException(
+                    "Session save revision mismatch: expected "
+                        + expectedRevision + ", received " + revision
+                );
+            }
+            return new SessionSaveResult(
+                revision,
+                Long.parseLong(fields.get("bytes")),
+                Long.parseLong(fields.get("serialize_ns")),
+                Long.parseLong(fields.get("save_ns"))
+            );
+        } catch (NullPointerException | NumberFormatException exception) {
+            throw new IOException(
+                "Malformed session save completion: " + payload,
+                exception
+            );
+        }
     }
 }

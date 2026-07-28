@@ -137,15 +137,17 @@ Exit evidence:
 | P0-001 | Product brief | Draft complete |
 | P0-002 | v1 scope contract | Draft complete |
 | P0-003 | Repository and CMake skeleton | Complete; Windows build verified |
-| P0-004 | Three-OS skeleton CI | Added; awaiting first run |
+| P0-004 | Three-OS skeleton CI | Complete; Windows/macOS/Linux build and test matrix green |
 | P0-005 | Java/Skiko renderer spike | Windows reference window runs |
 | P0-006 | UI toolchain bootstrap | Pinned bootstrap verified on Windows |
-| P0-007 | Java–C++ process boundary | Windows verified, cross-platform pending |
+| P0-007 | Java–C++ process boundary | Complete for Phase 0 stdio transport; persistent handshake/load smoke green on three-OS CI |
 | P0-008 | Audio callback probes | Windows open: 64 cadence failed; Core Audio/JACK probes added but target runs pending; proprietary SDK path resolved, signing pending; three 2h soaks pending |
 | P0-009 | User interviews | Not started |
 | P0-010 | Dependency/license inventory | Not started |
 | P0-011 | Immutable real-time graph core | Windows production path, 5,001-publication sanitizer edit-storm, cross-block ramps, sample-rate modulation, and denormal protection verified; other backends and final soak pending |
-| P0-012 | Disk and session resilience | Atomic recovery, bounded disk/save workers, schema v3 stable-ID clips/routing/automation, v1/v2 migrations, lossy-export rejection, and a 200-track/2,000-clip/40-lane benchmark verified on three-OS CI/sanitizers; full session coverage, live integration, cold reference-hardware benchmarks, and media/plugin restoration pending |
+| P0-012 | Disk and session resilience | Background schema serialization and revisioned Java/C++ durable-save completion added; atomic recovery, bounded workers, schema v3, migrations, and reference benchmark covered; production-session ownership, complete state, cold hardware benchmarks, and media/plugin restoration pending |
+| P0-013 | Plugin process isolation | Not started |
+| P0-014 | Phase 0 exit review and Phase 1 backlog | Not started |
 
 ## Definition of done
 

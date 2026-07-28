@@ -5,6 +5,7 @@ import com.iramix.ui.ipc.IpcMessage;
 import com.iramix.ui.ipc.IpcProtocol;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.nio.file.Files;
 import java.nio.file.Path;
 
 public final class ArchitectureSmoke {
@@ -21,7 +22,14 @@ public final class ArchitectureSmoke {
             return;
         }
 
-        try (var session = EngineSession.launch(Path.of(engineProbe))) {
+        var temporary = Files.createTempDirectory(
+            "iramix-ipc-save-smoke-"
+        );
+        var project = temporary.resolve("session.irpx");
+        try (var session = EngineSession.launch(
+            Path.of(engineProbe),
+            project
+        )) {
             var welcome = session.welcome();
             if (welcome.protocolVersion() != IpcProtocol.VERSION) {
                 throw new AssertionError(
@@ -32,11 +40,33 @@ public final class ArchitectureSmoke {
                 throw new AssertionError("Engine did not advertise PING.");
             }
             session.ping();
+            if (!welcome.capabilities().contains("save_session")) {
+                throw new AssertionError(
+                    "Engine did not advertise session save."
+                );
+            }
+            var saved = session.saveSessionAsync(1).get();
+            if (
+                saved.revision() != 1
+                || saved.serializedBytes() == 0
+                || saved.serializationNanoseconds() == 0
+                || saved.durableSaveNanoseconds() == 0
+                || !Files.isRegularFile(project)
+            ) {
+                throw new AssertionError(
+                    "Session save did not durably round-trip."
+                );
+            }
             System.out.println(
-                "Persistent Java/C++ IPC passed on "
-                    + welcome.operatingSystem()
-                    + "."
+                "Persistent Java/C++ IPC and background save passed on "
+                    + welcome.operatingSystem() + " (bytes="
+                    + saved.serializedBytes() + ", serialize_ns="
+                    + saved.serializationNanoseconds() + ", save_ns="
+                    + saved.durableSaveNanoseconds() + ")."
             );
+        } finally {
+            Files.deleteIfExists(project);
+            Files.deleteIfExists(temporary);
         }
     }
 

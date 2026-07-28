@@ -151,6 +151,18 @@ warm-local corpus. It is not final cold-cache/reference-hardware evidence, and
 the serialization tail exceeding 16 ms confirms serialization must remain off
 the UI thread.
 
+The
+[`background session-save and IPC screening`](results/BACKGROUND_SESSION_SAVE_IPC_2026-07-28.md)
+moved validation and serialization onto the native save worker. Over 20
+reference-session revisions, local MSVC Release immutable-snapshot submission
+recorded p50 `0.0005 ms`, p95 `0.0012 ms`, and p99 `0.0014 ms`; worker
+serialization recorded p50 `2.8118 ms`, p95 `3.7502 ms`, and p99 `3.8251 ms`;
+durable save recorded p50 `13.5442 ms`, p95 `20.8262 ms`, and p99 `28.8445
+ms`. Submission meets the below-16-ms UI-stall budget. Durable completion is
+intentionally asynchronous and is not claimed to finish within one UI frame.
+The Java/C++ save smoke supplies correctness evidence for one small project,
+not IPC latency percentiles.
+
 ## Plugin bridge
 
 - bridge overhead target: below 5% of one core for 100 pass-through instances at

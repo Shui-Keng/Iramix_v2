@@ -41,6 +41,7 @@ add_library(iramix_core STATIC
     src/ipc/Protocol.cpp
     src/platform/Platform.cpp
     src/persistence/AsyncProjectSaver.cpp
+    src/persistence/AsyncSessionSaver.cpp
     src/persistence/DiskAudioWorkers.cpp
     src/persistence/Persistence.cpp
     src/persistence/SessionDocument.cpp
