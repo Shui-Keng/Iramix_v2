@@ -71,6 +71,50 @@ static_assert(
     return inputBase(control) + samples;
 }
 
+// macOS caps POSIX shared-memory and semaphore names at 31 characters
+// including the leading slash, and reports nothing more specific than a
+// failed open when that is exceeded. Names are therefore derived from a
+// short token rather than spelled out; Windows has no such limit but uses
+// the same token so both sides derive names identically.
+[[nodiscard]] std::string sharedMemoryPath(const std::string& token) {
+#if defined(_WIN32)
+    return "Local\\" + token;
+#else
+    return "/" + token;
+#endif
+}
+
+[[nodiscard]] std::string makeToken(
+    const std::uint64_t processId,
+    const std::uint64_t unique
+) {
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string token = "irx";
+    const auto append = [&token](std::uint64_t value) {
+        char buffer[17] {};
+        std::size_t length = 0U;
+        do {
+            buffer[length++] = digits[value & 0xFULL];
+            value >>= 4U;
+        } while (value != 0U && length < sizeof(buffer) - 1U);
+        while (length > 0U) {
+            token.push_back(buffer[--length]);
+        }
+    };
+    append(processId);
+    token.push_back('-');
+    append(unique);
+    return token;
+}
+
+[[nodiscard]] std::string semaphorePath(const std::string& token) {
+#if defined(_WIN32)
+    return "Local\\" + token + "e";
+#else
+    return "/" + token + "s";
+#endif
+}
+
 } // namespace
 
 struct PluginBridge::Impl final {
@@ -143,8 +187,8 @@ struct PluginBridge::Impl final {
             descriptor = -1;
         }
         if (owner && !name.empty()) {
-            ::shm_unlink(name.c_str());
-            ::sem_unlink((name + "-req").c_str());
+            ::shm_unlink(sharedMemoryPath(name).c_str());
+            ::sem_unlink(semaphorePath(name).c_str());
             owner = false;
         }
 #endif
@@ -195,16 +239,17 @@ std::unique_ptr<PluginBridge> PluginBridge::create(
     static std::atomic<std::uint64_t> counter {0U};
     const auto unique = counter.fetch_add(1U, std::memory_order_relaxed);
 #if defined(_WIN32)
-    impl->name = "Local\\iramix-plugin-bridge-"
-        + std::to_string(GetCurrentProcessId()) + "-"
-        + std::to_string(unique);
+    impl->name = makeToken(
+        static_cast<std::uint64_t>(GetCurrentProcessId()),
+        unique
+    );
     impl->mapping = CreateFileMappingA(
         INVALID_HANDLE_VALUE,
         nullptr,
         PAGE_READWRITE,
         0U,
         static_cast<DWORD>(bytes),
-        impl->name.c_str()
+        sharedMemoryPath(impl->name).c_str()
     );
     if (impl->mapping == nullptr) {
         error = "cannot create plugin bridge shared memory";
@@ -221,19 +266,21 @@ std::unique_ptr<PluginBridge> PluginBridge::create(
         nullptr,
         FALSE,
         FALSE,
-        (impl->name + "-req").c_str()
+        semaphorePath(impl->name).c_str()
     );
     if (impl->request == nullptr) {
         error = "cannot create plugin bridge request event";
         return {};
     }
 #else
-    impl->name = "/iramix-plugin-bridge-"
-        + std::to_string(static_cast<long long>(::getpid())) + "-"
-        + std::to_string(unique);
-    ::shm_unlink(impl->name.c_str());
+    impl->name = makeToken(
+        static_cast<std::uint64_t>(::getpid()),
+        unique
+    );
+    const auto shmPath = sharedMemoryPath(impl->name);
+    ::shm_unlink(shmPath.c_str());
     impl->descriptor =
-        ::shm_open(impl->name.c_str(), O_CREAT | O_EXCL | O_RDWR, 0600);
+        ::shm_open(shmPath.c_str(), O_CREAT | O_EXCL | O_RDWR, 0600);
     if (impl->descriptor < 0) {
         error = "cannot create plugin bridge shared memory";
         return {};
@@ -257,7 +304,7 @@ std::unique_ptr<PluginBridge> PluginBridge::create(
     }
     impl->control = static_cast<SharedControl*>(mapped);
 
-    const auto semaphoreName = impl->name + "-req";
+    const auto semaphoreName = semaphorePath(impl->name);
     ::sem_unlink(semaphoreName.c_str());
     impl->request =
         ::sem_open(semaphoreName.c_str(), O_CREAT | O_EXCL, 0600, 0U);
@@ -510,7 +557,7 @@ int PluginBridge::runChild(
     const HANDLE mapping = OpenFileMappingA(
         FILE_MAP_ALL_ACCESS,
         FALSE,
-        sharedMemoryName.c_str()
+        sharedMemoryPath(sharedMemoryName).c_str()
     );
     if (mapping == nullptr) {
         return 20;
@@ -548,7 +595,7 @@ int PluginBridge::runChild(
     const HANDLE request = OpenEventA(
         SYNCHRONIZE,
         FALSE,
-        (sharedMemoryName + "-req").c_str()
+        semaphorePath(sharedMemoryName).c_str()
     );
     if (request == nullptr) {
         UnmapViewOfFile(control);
@@ -556,7 +603,11 @@ int PluginBridge::runChild(
         return 24;
     }
 #else
-    const int descriptor = ::shm_open(sharedMemoryName.c_str(), O_RDWR, 0);
+    const int descriptor = ::shm_open(
+        sharedMemoryPath(sharedMemoryName).c_str(),
+        O_RDWR,
+        0
+    );
     if (descriptor < 0) {
         return 20;
     }
@@ -598,7 +649,7 @@ int PluginBridge::runChild(
     }
     control = static_cast<SharedControl*>(mapped);
     ::sem_t* const request =
-        ::sem_open((sharedMemoryName + "-req").c_str(), 0);
+        ::sem_open(semaphorePath(sharedMemoryName).c_str(), 0);
     if (request == SEM_FAILED) {
         ::munmap(control, bytes);
         return 24;
