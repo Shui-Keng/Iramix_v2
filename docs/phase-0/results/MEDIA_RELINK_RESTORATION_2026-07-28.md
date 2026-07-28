@@ -1,7 +1,7 @@
 # Media Relink and Restoration — 2026-07-28
 
-Status: P0-012 media restoration verified locally; hosted three-OS CI and
-sanitizer confirmation pending. Week 6 remains open.
+Status: P0-012 media restoration verified locally and on hosted three-OS CI
+plus sanitizers; Week 6 remains open.
 
 ## Scope
 
@@ -74,6 +74,33 @@ Full local suite passes:
 100% tests passed out of 6
 ```
 
+## CI and sanitizer results
+
+GitHub Actions:
+[`30355906479`](https://github.com/Shui-Keng/Iramix_v2/actions/runs/30355906479)
+
+All five jobs passed: Windows/macOS/Ubuntu build, `ctest`, and
+`gradle check`, plus ASan/UBSan and TSan with no diagnostics.
+
+Two failures were found and fixed on the way there, both worth recording
+because neither was reproducible locally:
+
+1. **macOS build failure.** `std::filesystem::file_size` returns
+   `std::uintmax_t`, which is `unsigned long` on libc++ and
+   `unsigned long long` on the local toolchain, so `std::min` had no
+   deducible common type. Windows and Linux compiled it. Fixed by
+   narrowing to `std::uint64_t` once, explicitly.
+2. **macOS `iramix.session` failure, unrelated to this change.** The
+   autosave scheduler test gave a 30 ms window to three durable journal
+   appends. macOS fsync latency overruns that, so the window fired between
+   edits and the third `markDirty` opened a new window instead of
+   replacing a pending one — correct scheduler behavior, racing test. A
+   diff against the last passing macOS run confirmed the interleaving
+   commits added only new files and touched no session code. The window is
+   now 500 ms, and the macOS session suite runs in 0.79 s. Test pacing
+   only; no scheduler behavior changed. See
+   [`AUTOSAVE_CHECKPOINT_COMPACTION`](AUTOSAVE_CHECKPOINT_COMPACTION_2026-07-28.md).
+
 ## Evidence boundary
 
 This proves classification of present, replaced, moved, unhashed, and
@@ -83,7 +110,6 @@ of content changes past the hash bound.
 
 It does not prove:
 
-- hosted three-OS CI or sanitizer results for the resolver (not yet run);
 - that any audio actually decodes from a resolved path — nothing here
   opens a media file as audio, and `SessionMediaSource::frameCount`,
   `sampleRate`, and `channelCount` remain unverified descriptive metadata
