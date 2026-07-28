@@ -17,6 +17,15 @@ single crash capable of destroying otherwise valid work.
   atomically replaces the committed target.
 - The command journal is append-only, strictly sequenced, and checksummed per
   record. Durable append completion is the persistent-command ACK boundary.
+- The session-command payload has its own schema and stores the history action
+  plus forward and inverse commands. Its envelope sequence equals the
+  resulting session revision.
+- A project-backed edit is prepared against a candidate session, durably
+  appended, then atomically published to the control-thread owner. An
+  uncertain append failure freezes further live edits until reopen.
+- Undo and redo are journal records with new monotonic revisions. Recovery
+  loads a snapshot, replays only newer state changes, and reads retained older
+  records to rebuild undo/redo stacks.
 - Recording staging uses a versioned header and individually sequenced,
   checksummed audio blocks.
 - Recovery accepts only the longest valid prefix. Partial, corrupt, or
@@ -73,6 +82,8 @@ File durability uses `_commit` on Windows and `fsync` on POSIX.
 - One worker-accepted session save remains immutable and cannot be coalesced
   away. At most one unaccepted pending snapshot is retained and may be replaced
   only by a newer revision.
+- A stale or invalid edit creates no journal record; undo/redo replay preserves
+  stable IDs and deterministic state across process reopen.
 
 ## Initial evidence
 
@@ -89,8 +100,9 @@ worker pipelines. The stable-ID session DTO plus v1/v2-to-v3 migration fixtures
 are implemented. The session-document pipeline performs serialization on its
 worker and reports separate serialization and durable-save timing.
 
-The Java/C++ probe now queries and edits the native session before save, so its
-snapshot no longer originates in the save handler. The edit surface and schema
-are still partial. Final media conversion, complete DAW session coverage,
-command-journal/undo integration, full-scale large-recording timing, and cold
+The Java/C++ probe now queries and edits the native session before save, then
+reopens the project, reconstructs undo history, applies another journaled undo,
+and saves that revision. The edit surface and schema are still partial. Final
+media conversion, complete DAW session coverage, autosave/journal compaction,
+full-scale large-recording timing, power-loss injection, and cold
 reference-project measurements remain pending, so this ADR remains proposed.

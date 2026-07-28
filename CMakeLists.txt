@@ -47,6 +47,7 @@ add_library(iramix_core STATIC
     src/persistence/SessionDocument.cpp
     src/persistence/SessionSaveCoordinator.cpp
     src/realtime/Audit.cpp
+    src/session/JournaledSession.cpp
     src/session/SessionController.cpp
 )
 

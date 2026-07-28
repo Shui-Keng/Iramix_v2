@@ -130,7 +130,6 @@ coalescing, and live Java edit → native state → durable save integration.
 It does not yet prove:
 
 - the complete V1 session state or editing command surface;
-- command-journal integration, undo, or redo for these live edits;
 - automatic time-based autosave scheduling;
 - snapshot behavior during sustained edits from the real AWT workspace;
 - MIDI, devices, plugins, media references, launcher state, or comping;
@@ -138,3 +137,6 @@ It does not yet prove:
 
 Hosted CI validates portability and sanitizers but is not storage-hardware
 or audio-hardware evidence.
+
+The command-journal/undo limitation above was addressed by the next slice:
+[`JOURNALED_SESSION_UNDO_REDO_2026-07-28.md`](JOURNALED_SESSION_UNDO_REDO_2026-07-28.md).

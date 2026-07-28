@@ -1,6 +1,7 @@
 #include "iramix/ipc/Protocol.hpp"
 #include "iramix/persistence/SessionSaveCoordinator.hpp"
 #include "iramix/platform/Platform.hpp"
+#include "iramix/session/JournaledSession.hpp"
 #include "iramix/session/SessionController.hpp"
 
 #include <charconv>
@@ -111,16 +112,69 @@ bool configureBinaryStandardStreams() {
     return payload;
 }
 
+[[nodiscard]] std::string journaledEditFailure(
+    const iramix::session::JournaledEditResult& result,
+    const std::string& detail
+) {
+    using iramix::session::JournaledEditStatus;
+    std::string status;
+    switch (result.status) {
+    case JournaledEditStatus::revisionConflict:
+        status = "revision_conflict";
+        break;
+    case JournaledEditStatus::invalidArgument:
+        status = "invalid_argument";
+        break;
+    case JournaledEditStatus::entityNotFound:
+        status = "entity_not_found";
+        break;
+    case JournaledEditStatus::allocationFailure:
+        status = "allocation_failure";
+        break;
+    case JournaledEditStatus::journalFailure:
+        status = "journal_failure";
+        break;
+    case JournaledEditStatus::nothingToUndo:
+        status = "nothing_to_undo";
+        break;
+    case JournaledEditStatus::nothingToRedo:
+        status = "nothing_to_redo";
+        break;
+    case JournaledEditStatus::applied:
+        status = "applied";
+        break;
+    }
+    auto payload = status + ";current_revision="
+        + std::to_string(result.revision);
+    if (!detail.empty()) {
+        payload += ";detail=" + detail;
+    }
+    return payload;
+}
+
 int runIpcSession(const std::filesystem::path& projectTarget) {
     using iramix::ipc::Message;
     using iramix::ipc::MessageType;
 
-    iramix::session::SessionController session;
+    iramix::session::SessionController ephemeralSession;
+    std::unique_ptr<iramix::session::JournaledSession>
+        journaledSession;
     std::unique_ptr<
         iramix::persistence::SessionSaveCoordinator
     > saveCoordinator;
     std::string setupError;
     if (!projectTarget.empty()) {
+        journaledSession =
+            iramix::session::JournaledSession::open(
+                projectTarget,
+                setupError
+            );
+        if (journaledSession == nullptr) {
+            std::cerr
+                << "Journaled session setup failed: "
+                << setupError << '\n';
+            return 5;
+        }
         saveCoordinator =
             iramix::persistence::SessionSaveCoordinator::create(
             projectTarget,
@@ -134,6 +188,21 @@ int runIpcSession(const std::filesystem::path& projectTarget) {
             return 5;
         }
     }
+    const auto currentRevision = [&]() noexcept {
+        return journaledSession != nullptr
+            ? journaledSession->currentRevision()
+            : ephemeralSession.currentRevision();
+    };
+    const auto trackCount = [&]() noexcept {
+        return journaledSession != nullptr
+            ? journaledSession->trackCount()
+            : ephemeralSession.trackCount();
+    };
+    const auto sessionSnapshot = [&]() {
+        return journaledSession != nullptr
+            ? journaledSession->snapshot()
+            : ephemeralSession.snapshot();
+    };
 
     bool welcomed = false;
     while (true) {
@@ -171,7 +240,8 @@ int runIpcSession(const std::filesystem::path& projectTarget) {
                     + ";capabilities=ping,shutdown,"
                       "session_state,set_tempo"
                     + (saveCoordinator != nullptr
-                        ? ",save_session,poll_save_completion"
+                        ? ",save_session,poll_save_completion,"
+                          "undo,redo"
                         : "");
             }
         } else if (request.type == MessageType::ping) {
@@ -180,8 +250,18 @@ int runIpcSession(const std::filesystem::path& projectTarget) {
         } else if (request.type == MessageType::sessionState) {
             response.type = MessageType::acknowledgement;
             response.payload = "revision="
-                + std::to_string(session.currentRevision())
-                + ";tracks=" + std::to_string(session.trackCount());
+                + std::to_string(currentRevision())
+                + ";tracks=" + std::to_string(trackCount());
+            if (journaledSession != nullptr) {
+                response.payload += ";undo_depth="
+                    + std::to_string(
+                        journaledSession->undoDepth()
+                    )
+                    + ";redo_depth="
+                    + std::to_string(
+                        journaledSession->redoDepth()
+                    );
+            }
         } else if (request.type == MessageType::setTempo) {
             std::uint64_t expectedRevision = 0U;
             double tempo = 0.0;
@@ -192,26 +272,75 @@ int runIpcSession(const std::filesystem::path& projectTarget) {
                 )) {
                 response.payload = "invalid_tempo_edit";
             } else {
-                const auto result = session.setTempo(
-                    expectedRevision,
-                    tempo
-                );
+                if (journaledSession != nullptr) {
+                    std::string editError;
+                    const auto result =
+                        journaledSession->setTempo(
+                            expectedRevision,
+                            tempo,
+                            editError
+                        );
+                    if (result.applied()) {
+                        response.type =
+                            MessageType::acknowledgement;
+                        response.payload = "revision="
+                            + std::to_string(result.revision);
+                    } else {
+                        response.payload = journaledEditFailure(
+                            result,
+                            editError
+                        );
+                    }
+                } else {
+                    const auto result =
+                        ephemeralSession.setTempo(
+                            expectedRevision,
+                            tempo
+                        );
+                    if (result.applied()) {
+                        response.type =
+                            MessageType::acknowledgement;
+                        response.payload = "revision="
+                            + std::to_string(result.revision);
+                    } else if (
+                        result.status
+                        == iramix::session::
+                            SessionEditStatus::revisionConflict
+                    ) {
+                        response.payload =
+                            "revision_conflict;current_revision="
+                            + std::to_string(result.revision);
+                    } else {
+                        response.payload =
+                            "invalid_tempo;current_revision="
+                            + std::to_string(result.revision);
+                    }
+                }
+            }
+        } else if (
+            request.type == MessageType::undo
+            || request.type == MessageType::redo
+        ) {
+            std::uint64_t revision = 0U;
+            if (journaledSession == nullptr) {
+                response.payload = "project_target_required";
+            } else if (!parseRevision(request.payload, revision)) {
+                response.payload = "invalid_history_revision";
+            } else {
+                std::string editError;
+                const auto result =
+                    request.type == MessageType::undo
+                    ? journaledSession->undo(revision, editError)
+                    : journaledSession->redo(revision, editError);
                 if (result.applied()) {
                     response.type = MessageType::acknowledgement;
                     response.payload = "revision="
                         + std::to_string(result.revision);
-                } else if (
-                    result.status
-                    == iramix::session::
-                        SessionEditStatus::revisionConflict
-                ) {
-                    response.payload =
-                        "revision_conflict;current_revision="
-                        + std::to_string(result.revision);
                 } else {
-                    response.payload =
-                        "invalid_tempo;current_revision="
-                        + std::to_string(result.revision);
+                    response.payload = journaledEditFailure(
+                        result,
+                        editError
+                    );
                 }
             }
         } else if (request.type == MessageType::saveSession) {
@@ -220,15 +349,15 @@ int runIpcSession(const std::filesystem::path& projectTarget) {
                 response.payload = "project_target_required";
             } else if (!parseRevision(request.payload, revision)) {
                 response.payload = "invalid_save_revision";
-            } else if (revision != session.currentRevision()) {
+            } else if (revision != currentRevision()) {
                 response.payload =
                     "revision_conflict;current_revision="
-                    + std::to_string(session.currentRevision());
+                    + std::to_string(currentRevision());
             } else {
                 try {
                     const auto result =
                         saveCoordinator->requestSave(
-                            session.snapshot()
+                            sessionSnapshot()
                         );
                     if (result
                             == iramix::persistence::

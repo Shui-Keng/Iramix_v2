@@ -57,6 +57,12 @@ and save-worker timings are covered by
 Native session ownership, revision conflicts, immutable snapshot isolation,
 stable-ID continuation, and latest-revision save coalescing are covered by
 [`PRODUCTION_SESSION_SAVE_COALESCING_2026-07-28.md`](results/PRODUCTION_SESSION_SAVE_COALESCING_2026-07-28.md).
-The production-session-ownership portion is therefore addressed; R-06 remains
-open for complete state, journal/undo integration, cold storage, backup, and
-power-loss evidence.
+Write-ahead live edits, monotonic undo/redo, snapshot-plus-journal recovery,
+history reconstruction, and stable-ID redo are covered locally by
+[`JOURNALED_SESSION_UNDO_REDO_2026-07-28.md`](results/JOURNALED_SESSION_UNDO_REDO_2026-07-28.md).
+The production-session and initial journal/undo portions are therefore
+addressed. R-06 remains open for hosted portability confirmation of this
+slice, complete state, autosave and journal compaction, cold storage, backup,
+and physical power-loss evidence. The first durable-command latency p99 also
+missed the provisional 10 ms control target, so performance optimization must
+not be treated as complete.

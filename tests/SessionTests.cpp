@@ -1,6 +1,7 @@
 #include "iramix/persistence/ProjectStore.hpp"
 #include "iramix/persistence/SessionDocument.hpp"
 #include "iramix/persistence/SessionSaveCoordinator.hpp"
+#include "iramix/session/JournaledSession.hpp"
 #include "iramix/session/SessionController.hpp"
 
 #include <algorithm>
@@ -228,6 +229,210 @@ void testSessionController() {
            "immutable_snapshots=1\n";
 }
 
+void testJournaledSession(const std::filesystem::path& root) {
+    const auto project = root / "journaled-session.irpx";
+    std::string error;
+    auto session =
+        iramix::session::JournaledSession::open(project, error);
+    require(session != nullptr, error.c_str());
+
+    const auto tempo = session->setTempo(1U, 132.0, error);
+    require(
+        tempo.applied() && tempo.revision == 2U,
+        "journaled tempo edit reaches durable revision two"
+    );
+    const auto stale = session->setTempo(1U, 140.0, error);
+    require(
+        stale.status
+            == iramix::session::
+                JournaledEditStatus::revisionConflict,
+        "stale journaled edit is rejected before append"
+    );
+    const auto added = session->addTrack(
+        2U,
+        iramix::persistence::SessionTrackType::instrument,
+        "Production instrument",
+        0xFF44'6688U,
+        error
+    );
+    require(
+        added.applied()
+            && added.revision == 3U
+            && added.entityId == 2U,
+        "journaled add allocates a stable track ID"
+    );
+
+    const auto revisionThree = session->snapshot();
+    const auto payload =
+        iramix::persistence::serializeSessionDocument(
+            *revisionThree,
+            error
+        );
+    require(!payload.empty(), error.c_str());
+    require(
+        iramix::persistence::saveProjectSnapshot(
+            project,
+            payload,
+            error
+        ),
+        error.c_str()
+    );
+
+    const auto renamed = session->renameTrack(
+        3U,
+        added.entityId,
+        "Renamed instrument",
+        error
+    );
+    require(
+        renamed.applied() && renamed.revision == 4U,
+        "journaled rename reaches revision four"
+    );
+    const auto undoRename = session->undo(4U, error);
+    require(
+        undoRename.applied()
+            && undoRename.revision == 5U
+            && session->snapshot()->tracks[1].name
+                == "Production instrument",
+        "undo appends revision five and restores the prior name"
+    );
+
+    session.reset();
+    session = iramix::session::JournaledSession::open(
+        project,
+        error
+    );
+    require(session != nullptr, error.c_str());
+    require(
+        session->currentRevision() == 5U
+            && session->undoDepth() == 2U
+            && session->redoDepth() == 1U
+            && session->snapshot()->tracks[1].name
+                == "Production instrument",
+        "open replays commands newer than snapshot and rebuilds history"
+    );
+
+    const auto redoRename = session->redo(5U, error);
+    require(
+        redoRename.applied()
+            && redoRename.revision == 6U
+            && session->snapshot()->tracks[1].name
+                == "Renamed instrument",
+        "redo appends a new revision and reapplies rename"
+    );
+    require(
+        session->undo(6U, error).applied(),
+        "rename can be undone again"
+    );
+    require(
+        session->setTempo(7U, 140.0, error).applied()
+            && session->redoDepth() == 0U,
+        "new edit after undo clears the redo branch"
+    );
+    require(
+        session->undo(8U, error).applied()
+            && session->snapshot()->tempo == 132.0,
+        "tempo undo restores the prior durable value"
+    );
+    require(
+        session->undo(9U, error).applied()
+            && session->trackCount() == 1U,
+        "undoing add-track removes the unreferenced track"
+    );
+    const auto redoAdd = session->redo(10U, error);
+    require(
+        redoAdd.applied()
+            && redoAdd.revision == 11U
+            && session->trackCount() == 2U
+            && session->snapshot()->tracks[1].stableId
+                == added.entityId,
+        "redoing add-track restores the same stable ID"
+    );
+
+    session.reset();
+    session = iramix::session::JournaledSession::open(
+        project,
+        error
+    );
+    require(session != nullptr, error.c_str());
+    const auto recovered = session->snapshot();
+    require(
+        recovered->revision == 11U
+            && recovered->tempo == 132.0
+            && recovered->tracks.size() == 2U
+            && recovered->tracks[1].stableId == 2U
+            && recovered->tracks[1].name
+                == "Production instrument"
+            && session->undoDepth() == 2U
+            && session->redoDepth() == 1U,
+        "full reopen deterministically replays undo and redo records"
+    );
+
+    const auto journal =
+        iramix::session::JournaledSession::journalPathForProject(
+            project
+        );
+    const auto journalRecovery =
+        iramix::persistence::recoverCommandJournal(journal);
+    require(journalRecovery.ok(), journalRecovery.error.c_str());
+    require(
+        journalRecovery.commands.size() == 10U
+            && journalRecovery.commands.front().sequence == 2U
+            && journalRecovery.commands.back().sequence == 11U,
+        "only applied edits and history actions enter the journal"
+    );
+
+    std::cout
+        << "Journaled session: snapshot_revision=3, "
+           "replayed_revision=11, durable_records=10, "
+           "stale_records=0, undo_depth=2, redo_depth=1, "
+           "stable_track_id=2\n";
+}
+
+void testJournaledEditLatency(const std::filesystem::path& root) {
+    std::string error;
+    auto session = iramix::session::JournaledSession::open(
+        root / "journal-latency.irpx",
+        error
+    );
+    require(session != nullptr, error.c_str());
+
+    constexpr std::size_t iterations = 100U;
+    std::vector<double> milliseconds;
+    milliseconds.reserve(iterations);
+    for (std::size_t index = 0U; index < iterations; ++index) {
+        const auto revision = session->currentRevision();
+        const auto started = std::chrono::steady_clock::now();
+        const auto result = session->setTempo(
+            revision,
+            index % 2U == 0U ? 120.0 : 121.0,
+            error
+        );
+        const double elapsed =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - started
+            ).count();
+        require(result.applied(), error.c_str());
+        milliseconds.push_back(elapsed);
+    }
+    const double p50 =
+        percentileMilliseconds(milliseconds, 0.50);
+    const double p95 =
+        percentileMilliseconds(milliseconds, 0.95);
+    const double p99 =
+        percentileMilliseconds(milliseconds, 0.99);
+    const double maximum = *std::max_element(
+        milliseconds.begin(),
+        milliseconds.end()
+    );
+    std::cout
+        << "Journaled edit durable ACK: iterations=" << iterations
+        << ", p50_ms=" << p50
+        << ", p95_ms=" << p95
+        << ", p99_ms=" << p99
+        << ", max_ms=" << maximum << '\n';
+}
+
 void testSaveCoalescing(const std::filesystem::path& root) {
     iramix::session::SessionController controller;
     const auto revisionOne = controller.snapshot();
@@ -444,6 +649,8 @@ void testRunningCoordinator(const std::filesystem::path& root) {
 int main() {
     TemporaryDirectory temporary;
     testSessionController();
+    testJournaledSession(temporary.path());
+    testJournaledEditLatency(temporary.path());
     testSaveCoalescing(temporary.path());
     testRunningCoordinator(temporary.path());
     testReferenceSnapshotBenchmark();

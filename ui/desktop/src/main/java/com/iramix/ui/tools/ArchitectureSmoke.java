@@ -52,6 +52,18 @@ public final class ArchitectureSmoke {
                     "Revisioned tempo edit did not apply."
                 );
             }
+            revision = session.undo(revision);
+            if (revision != 3) {
+                throw new AssertionError(
+                    "Revisioned undo did not apply."
+                );
+            }
+            revision = session.redo(revision);
+            if (revision != 4) {
+                throw new AssertionError(
+                    "Revisioned redo did not apply."
+                );
+            }
             if (!welcome.capabilities().contains("save_session")) {
                 throw new AssertionError(
                     "Engine did not advertise session save."
@@ -84,7 +96,33 @@ public final class ArchitectureSmoke {
                     + ", covered_revision=" + covered.revision()
                     + ")."
             );
+        }
+        try (var recovered = EngineSession.launch(
+            Path.of(engineProbe),
+            project
+        )) {
+            var revision = recovered.currentSessionRevision();
+            if (revision != 5) {
+                throw new AssertionError(
+                    "Recovered session did not reopen at revision 5."
+                );
+            }
+            revision = recovered.undo(revision);
+            if (revision != 6) {
+                throw new AssertionError(
+                    "Recovered undo history did not advance revision."
+                );
+            }
+            var saved = recovered.saveSession(revision);
+            if (saved.revision() != 6) {
+                throw new AssertionError(
+                    "Recovered undo revision was not durable."
+                );
+            }
         } finally {
+            Files.deleteIfExists(
+                Path.of(project + ".commands.irjc")
+            );
             Files.deleteIfExists(project);
             Files.deleteIfExists(temporary);
         }

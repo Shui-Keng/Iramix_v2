@@ -172,6 +172,16 @@ submitted only revisions 2 and 4 while preserving revision 4 as the durable
 superset. Snapshot creation is below the 16 ms UI-stall target in this warm
 local screening; cold reference-hardware evidence remains open.
 
+The
+[`journaled session and undo/redo screening`](results/JOURNALED_SESSION_UNDO_REDO_2026-07-28.md)
+measured 100 sequential, durably flushed tempo edits in local MSVC Release:
+p50 `2.6163 ms`, p95 `4.0549 ms`, p99 `10.1046 ms`, and maximum `12.2645
+ms`. The p99 exceeds the provisional below-10-ms UI-engine command target by
+`0.1046 ms` before Java transport or dummy UI load, so the performance gate is
+explicitly not met by this run. Correctness/recovery tests pass; group commit,
+persistent journal handles, and end-to-end loaded measurement remain follow-up
+work.
+
 ## Plugin bridge
 
 - bridge overhead target: below 5% of one core for 100 pass-through instances at

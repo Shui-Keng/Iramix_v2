@@ -141,6 +141,22 @@ SessionEditResult SessionController::addTrack(
     const std::string_view name,
     const std::uint32_t color
 ) noexcept {
+    return addTrackWithStableId(
+        expectedRevision,
+        nextStableId_,
+        type,
+        name,
+        color
+    );
+}
+
+SessionEditResult SessionController::addTrackWithStableId(
+    const std::uint64_t expectedRevision,
+    const std::uint64_t stableId,
+    const persistence::SessionTrackType type,
+    const std::string_view name,
+    const std::uint32_t color
+) noexcept {
     const auto revision = conflictOrCurrent(expectedRevision);
     if (!revision.applied()) {
         return revision;
@@ -149,8 +165,8 @@ SessionEditResult SessionController::addTrack(
         || name.size() > kMaximumEditNameBytes
         || type < persistence::SessionTrackType::audio
         || type > persistence::SessionTrackType::master
-        || nextStableId_
-            == std::numeric_limits<std::uint64_t>::max()
+        || stableId == 0U
+        || stableId == std::numeric_limits<std::uint64_t>::max()
         || document_.revision
             == std::numeric_limits<std::uint64_t>::max()) {
         return {
@@ -158,9 +174,21 @@ SessionEditResult SessionController::addTrack(
             .revision = document_.revision,
         };
     }
+    const auto duplicate = std::find_if(
+        document_.tracks.begin(),
+        document_.tracks.end(),
+        [stableId](const persistence::SessionTrack& candidate) {
+            return candidate.stableId == stableId;
+        }
+    );
+    if (duplicate != document_.tracks.end()) {
+        return {
+            .status = SessionEditStatus::invalidArgument,
+            .revision = document_.revision,
+        };
+    }
     try {
         std::string ownedName {name};
-        const auto stableId = nextStableId_;
         document_.tracks.push_back({
             .stableId = stableId,
             .type = type,
@@ -168,7 +196,7 @@ SessionEditResult SessionController::addTrack(
             .color = color,
             .name = std::move(ownedName),
         });
-        ++nextStableId_;
+        nextStableId_ = std::max(nextStableId_, stableId + 1U);
         ++document_.revision;
         return {
             .status = SessionEditStatus::applied,
@@ -229,6 +257,75 @@ SessionEditResult SessionController::renameTrack(
             .revision = document_.revision,
         };
     }
+}
+
+SessionEditResult SessionController::removeTrack(
+    const std::uint64_t expectedRevision,
+    const std::uint64_t trackId
+) noexcept {
+    const auto revision = conflictOrCurrent(expectedRevision);
+    if (!revision.applied()) {
+        return revision;
+    }
+    if (document_.revision
+        == std::numeric_limits<std::uint64_t>::max()) {
+        return {
+            .status = SessionEditStatus::invalidArgument,
+            .revision = document_.revision,
+        };
+    }
+    const auto track = std::find_if(
+        document_.tracks.begin(),
+        document_.tracks.end(),
+        [trackId](const persistence::SessionTrack& candidate) {
+            return candidate.stableId == trackId;
+        }
+    );
+    if (track == document_.tracks.end()) {
+        return {
+            .status = SessionEditStatus::entityNotFound,
+            .revision = document_.revision,
+        };
+    }
+    const auto clipReferencesTrack = std::any_of(
+        document_.clips.begin(),
+        document_.clips.end(),
+        [trackId](const persistence::SessionClip& clip) {
+            return clip.trackId == trackId;
+        }
+    );
+    const auto routeReferencesTrack = std::any_of(
+        document_.routes.begin(),
+        document_.routes.end(),
+        [trackId](const persistence::SessionRoute& route) {
+            return route.sourceTrackId == trackId
+                || route.destinationTrackId == trackId;
+        }
+    );
+    const auto automationReferencesTrack = std::any_of(
+        document_.automationLanes.begin(),
+        document_.automationLanes.end(),
+        [trackId](
+            const persistence::SessionAutomationLane& lane
+        ) {
+            return lane.targetTrackId == trackId;
+        }
+    );
+    if (clipReferencesTrack
+        || routeReferencesTrack
+        || automationReferencesTrack) {
+        return {
+            .status = SessionEditStatus::invalidArgument,
+            .revision = document_.revision,
+        };
+    }
+    document_.tracks.erase(track);
+    ++document_.revision;
+    return {
+        .status = SessionEditStatus::applied,
+        .revision = document_.revision,
+        .entityId = trackId,
+    };
 }
 
 } // namespace iramix::session

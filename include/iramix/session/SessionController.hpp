@@ -59,10 +59,23 @@ public:
         std::uint32_t color
     ) noexcept;
 
+    [[nodiscard]] SessionEditResult addTrackWithStableId(
+        std::uint64_t expectedRevision,
+        std::uint64_t stableId,
+        persistence::SessionTrackType type,
+        std::string_view name,
+        std::uint32_t color
+    ) noexcept;
+
     [[nodiscard]] SessionEditResult renameTrack(
         std::uint64_t expectedRevision,
         std::uint64_t trackId,
         std::string_view name
+    ) noexcept;
+
+    [[nodiscard]] SessionEditResult removeTrack(
+        std::uint64_t expectedRevision,
+        std::uint64_t trackId
     ) noexcept;
 
 private:

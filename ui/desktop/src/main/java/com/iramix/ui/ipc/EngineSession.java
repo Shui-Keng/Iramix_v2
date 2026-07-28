@@ -140,6 +140,22 @@ public final class EngineSession implements AutoCloseable {
         );
     }
 
+    public long undo(long expectedRevision) throws IOException {
+        return revisionedHistoryCommand(
+            IpcMessage.Type.UNDO,
+            expectedRevision,
+            "undo"
+        );
+    }
+
+    public long redo(long expectedRevision) throws IOException {
+        return revisionedHistoryCommand(
+            IpcMessage.Type.REDO,
+            expectedRevision,
+            "redo"
+        );
+    }
+
     public SessionSaveResult saveSession(long revision)
         throws IOException {
         requestSessionSave(revision);
@@ -190,6 +206,27 @@ public final class EngineSession implements AutoCloseable {
                 "Engine returned invalid SAVE_SESSION ACK."
             );
         }
+    }
+
+    private long revisionedHistoryCommand(
+        IpcMessage.Type type,
+        long expectedRevision,
+        String context
+    ) throws IOException {
+        if (expectedRevision <= 0) {
+            throw new IllegalArgumentException(
+                "Session revision must be positive."
+            );
+        }
+        var response = exchangeNew(
+            type,
+            "revision=" + expectedRevision
+        );
+        return parseRequiredLong(
+            response.payload(),
+            "revision",
+            context
+        );
     }
 
     private SessionSaveResult awaitSessionSave(long revision)

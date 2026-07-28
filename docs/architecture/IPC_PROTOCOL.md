@@ -65,11 +65,13 @@ Version 1 message type values:
 | 8 | `POLL_SAVE_COMPLETION` |
 | 9 | `SET_TEMPO` |
 | 10 | `SESSION_STATE` |
+| 11 | `UNDO` |
+| 12 | `REDO` |
 
 The executable mode `iramix_engine_probe --ipc-stdio` validates
 `HELLO/WELCOME`, sequenced `PING/ACK`, and clean `SHUTDOWN/ACK`. When launched
 with `--project <path>`, it also advertises `save_session` and
-`poll_save_completion`.
+`poll_save_completion`, `undo`, and `redo`.
 
 `SAVE_SESSION` returns an immediate ACK only after the immutable snapshot is
 accepted by the bounded native pipeline. It does not claim durability.
@@ -92,6 +94,14 @@ returns the resulting revision or rejects it with the current revision. Save
 requests must name the current native revision. The save coordinator may
 replace an unaccepted pending snapshot with a newer revision, but it never
 drops a revision already accepted by the worker.
+
+With a project target, `SET_TEMPO`, `UNDO`, and `REDO` cross the native
+write-ahead boundary before ACK. Each successful operation creates a new,
+strictly increasing session revision. Undo never returns to an old revision;
+it applies the stored inverse as a new command. Reopen loads the committed
+snapshot, replays any later commands, and reconstructs retained history before
+WELCOME. An append error rejects the operation and requires process reopen
+before another persistent edit is accepted.
 
 ## Phase 0 load-test evidence
 
@@ -135,6 +145,8 @@ acts as the regression check.
 - `POLL_SAVE_COMPLETION`: consume the oldest durable save completion.
 - `SET_TEMPO`: Phase 0 revisioned-edit exemplar against native session state.
 - `SESSION_STATE`: query compact current native session state.
+- `UNDO`: apply the current history entry's inverse as a new revision.
+- `REDO`: reapply the current redo entry as a new revision.
 
 ## Ordering and back-pressure
 

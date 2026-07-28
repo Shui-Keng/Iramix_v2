@@ -76,6 +76,15 @@ an expected revision. Stale or invalid edits leave the document unchanged.
 Persistence receives an explicit deep-copied immutable DTO snapshot; runtime
 audio nodes are still compiled and owned separately.
 
+For project-backed sessions, `JournaledSession` wraps that controller with a
+write-ahead command boundary. It validates and applies an edit to a candidate
+document, durably appends the forward/inverse command pair, and only then
+publishes the candidate state and permits an IPC ACK. Undo and redo append new
+monotonic revisions instead of moving the revision counter backwards. On
+reopen, the latest project snapshot is loaded first, later journal commands
+are replayed, and the complete retained journal rebuilds undo/redo history.
+An ambiguous append failure poisons the live edit path until reopen.
+
 ### DSP worker pool
 
 - Executes only independent graph partitions.
@@ -189,10 +198,10 @@ save and load. V1/v2 migrations supply deterministic defaults and empty v3
 collections; lossy legacy export is rejected. Runtime audio nodes are not
 serialized.
 
-The Java/C++ Phase 0 probe now exercises revisioned save acceptance and durable
-completion through IPC. The saved snapshot now comes from the native editable
-session after a revisioned tempo edit. A coordinator retains one accepted save
-and coalesces later unaccepted requests to the latest immutable revision.
-Complete DAW session coverage, command-journal/undo integration, final media
+The Java/C++ Phase 0 probe now exercises revisioned journaled edits, undo/redo,
+save acceptance, durable completion, process reopen, history reconstruction,
+and a post-recovery save. A coordinator retains one accepted save and
+coalesces later unaccepted requests to the latest immutable revision. Complete
+DAW session coverage, autosave scheduling, journal compaction, final media
 conversion, cold-cache/reference-hardware timing, and media/plugin restoration
 remain pending.
