@@ -1,5 +1,6 @@
 #pragma once
 
+#include "iramix/persistence/AutosaveClock.hpp"
 #include "iramix/persistence/SessionSaveCoordinator.hpp"
 
 #include <chrono>
@@ -34,12 +35,15 @@ public:
         const SessionPersistenceService&
     ) = delete;
 
+    // A null clock uses the steady clock. Pass a ManualAutosaveClock to
+    // drive the autosave window deterministically.
     [[nodiscard]] static std::unique_ptr<SessionPersistenceService>
     create(
         std::filesystem::path target,
         std::chrono::milliseconds autosaveInterval,
         std::string& error,
-        std::uint64_t initialDurableRevision = 0U
+        std::uint64_t initialDurableRevision = 0U,
+        std::shared_ptr<AutosaveClock> clock = {}
     );
 
     [[nodiscard]] bool start(std::string& error);
@@ -67,7 +71,8 @@ public:
 private:
     SessionPersistenceService(
         std::unique_ptr<SessionSaveCoordinator> coordinator,
-        std::chrono::milliseconds autosaveInterval
+        std::chrono::milliseconds autosaveInterval,
+        std::shared_ptr<AutosaveClock> clock
     );
 
     void run() noexcept;
@@ -75,6 +80,7 @@ private:
 
     std::unique_ptr<SessionSaveCoordinator> coordinator_;
     std::chrono::milliseconds autosaveInterval_;
+    std::shared_ptr<AutosaveClock> clock_;
     mutable std::mutex mutex_;
     std::condition_variable wake_;
     std::thread worker_;

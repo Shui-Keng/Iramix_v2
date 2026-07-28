@@ -26,6 +26,9 @@ constexpr std::size_t kMaximumEditNameBytes = 1'024U;
     include(document.clips);
     include(document.routes);
     include(document.automationLanes);
+    include(document.mediaSources);
+    include(document.midiSequences);
+    include(document.plugins);
     return maximum;
 }
 
@@ -311,9 +314,17 @@ SessionEditResult SessionController::removeTrack(
             return lane.targetTrackId == trackId;
         }
     );
+    const auto pluginReferencesTrack = std::any_of(
+        document_.plugins.begin(),
+        document_.plugins.end(),
+        [trackId](const persistence::SessionPlugin& plugin) {
+            return plugin.targetTrackId == trackId;
+        }
+    );
     if (clipReferencesTrack
         || routeReferencesTrack
-        || automationReferencesTrack) {
+        || automationReferencesTrack
+        || pluginReferencesTrack) {
         return {
             .status = SessionEditStatus::invalidArgument,
             .revision = document_.revision,

@@ -540,4 +540,22 @@ int run(const std::uint32_t secondsPerBuffer) {
     return allMeasured ? 0 : 4;
 }
 
+// JACK enumeration is not implemented yet. See the note in CoreAudioProbe:
+// unsupported and empty must stay distinguishable.
+DeviceInventory enumerateDevices() {
+    return {
+        .supported = false,
+        .devices = {},
+        .error = "JACK device enumeration is not implemented",
+    };
+}
+
+int runRestoredDevice(
+    const std::filesystem::path&,
+    const std::uint32_t
+) {
+    std::cerr << "JACK device restoration is not implemented.\n";
+    return 3;
+}
+
 } // namespace iramix::audio_probe

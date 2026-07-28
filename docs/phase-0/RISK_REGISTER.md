@@ -16,11 +16,52 @@ Scoring: probability and impact range from 1 to 5. Priority is their product.
 | R-10 | Custom UI consumes capacity needed by audio engine | 4 | 4 | 16 | Limit widget set and measure delivery velocity at week 4 |
 | R-11 | Cross-platform behavior drifts | 4 | 4 | 16 | Three-OS CI plus screenshot and project round-trip tests |
 | R-12 | Plugin state blocks autosave or recovery | 3 | 4 | 12 | Snapshot asynchronously with size/time limits |
+| R-13 | No macOS or Linux hardware is available to the project | 5 | 4 | 20 | **Accepted for Phase 0.** Hosted three-OS CI covers portability, correctness, and sanitizers; performance evidence is Windows-only by decision. See "Reference-hardware coverage gap" |
 
 ## Critical escalation rule
 
 Any risk with priority 16 or above must have measured evidence or an accepted
 fallback before Phase 1 begins.
+
+## Reference-hardware coverage gap
+
+**Status: accepted as a Phase 0 risk on 2026-07-28.**
+
+R-13 is a hardware constraint, not an open engineering task: the project has
+no physical macOS or Linux machine. Hosted CI proves the code builds, passes
+tests, and is clean under ASan/UBSan and TSan on all three operating systems,
+but shared runners cannot produce cold-cache open timings or any other
+reference-hardware performance figure — their storage and cache behavior is
+neither controlled nor representative.
+
+### Accepted position
+
+Phase 0 performance evidence is **Windows-only**, deliberately. The
+reasoning, recorded here so a later reader does not mistake it for an
+oversight:
+
+1. No macOS or Linux hardware is accessible to the project, so the
+   measurement cannot be taken at all — this is not a matter of effort or
+   scheduling.
+2. Hosted CI runners are sufficient evidence for portability, correctness,
+   and sanitizer cleanliness, and are used as such throughout Phase 0.
+3. Hosted CI runners are **not** evidence of performance, and no timing
+   figure may be quoted from them. The build matrix runs `ctest` without
+   `-V`, so benchmark output does not even reach the logs, and the Windows
+   leg builds Debug rather than Release.
+
+Consequently every result document carrying a timing figure must state the
+platform and toolchain explicitly and must list macOS and Linux performance
+under its evidence boundary.
+
+### What this defers
+
+Cold-cache open behavior, storage-contention behavior, and audio-callback
+deadline behavior on macOS and Linux remain unmeasured entering Phase 1.
+Closing them requires borrowed, rented, or purchased hardware on both
+platforms; it cannot be closed by additional work on the existing machine.
+This acceptance covers Phase 0 only and should be revisited when Phase 1
+scope is committed.
 
 ## ASIO administrative and trademark note
 

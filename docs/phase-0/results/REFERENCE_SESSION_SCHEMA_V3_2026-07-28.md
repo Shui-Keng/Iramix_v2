@@ -3,6 +3,11 @@
 Status: P0-012 schema/reference benchmark verified locally and on hosted
 three-OS CI plus sanitizers; Week 6 remains open.
 
+Schema v3 has since been extended by
+[`COMPLETE_SESSION_STATE`](COMPLETE_SESSION_STATE_2026-07-28.md), which adds
+media references, MIDI, device configuration, and plugin state as v4. The
+results below describe the v3 format and its smaller reference workload.
+
 ## Scope
 
 Session schema v3 extends the editable persistence DTO with:

@@ -115,12 +115,20 @@ Exit evidence:
 - Prototype shared-memory audio/control transport.
 - Terminate the plugin process during playback.
 - Identify native editor embedding constraints on each OS.
+- Restore persisted plugin state into a hosted plugin instance.
 
 Exit evidence:
 
 - main process survives plugin termination;
 - measured bridge overhead;
-- plugin UI risk report.
+- plugin UI risk report;
+- a session's stored plugin state blob reloaded into a live plugin.
+
+Plugin state restoration moved here from P0-012. The schema v4 record
+(format, restorable identifier, slot, bypass, opaque bounded state blob)
+is stored and round-trips intact, but consuming it means starting a plugin
+host, which is exactly this task's boundary. Implementing it under P0-012
+would only have produced another layer that nothing consumes.
 
 ## Week 8: Review and Phase 1 commitment
 
@@ -141,12 +149,12 @@ Exit evidence:
 | P0-005 | Java/Skiko renderer spike | Windows reference window runs |
 | P0-006 | UI toolchain bootstrap | Pinned bootstrap verified on Windows |
 | P0-007 | Java–C++ process boundary | Complete for Phase 0 stdio transport; persistent handshake/load smoke green on three-OS CI |
-| P0-008 | Audio callback probes | Windows open: 64 cadence failed; Core Audio/JACK probes added but target runs pending; proprietary SDK path resolved, signing pending; three 2h soaks pending |
+| P0-008 | Audio callback probes | Windows open: 64 cadence failed; Core Audio/JACK probes added but target runs pending; proprietary SDK path resolved, signing pending; three 2h soaks pending; shared-mode path first exercised via session device restoration, which fixed an exclusive-mode-shaped buffer assertion and a deadline target table that returned zero outside 64/128/256 (see DEVICE_ENUMERATION_WINDOWS_2026-07-28) |
 | P0-009 | User interviews | Not started |
 | P0-010 | Dependency/license inventory | Not started |
 | P0-011 | Immutable real-time graph core | Windows production path, 5,001-publication sanitizer edit-storm, cross-block ramps, sample-rate modulation, and denormal protection verified; other backends and final soak pending |
-| P0-012 | Disk and session resilience | Native session ownership, write-ahead journal, monotonic undo/redo, replay, immutable/coalesced saves, fixed-window autosave, shutdown flush, revision-gated history compaction, revisioned backup rotation/retention, fail-closed automatic restore, and durable journal baselines verified locally and on three-OS CI/Java/sanitizers; complete state, cold hardware benchmarks, and media/plugin restoration pending |
-| P0-013 | Plugin process isolation | Not started |
+| P0-012 | Disk and session resilience | Native session ownership, write-ahead journal, monotonic undo/redo, replay, immutable/coalesced saves, fixed-window autosave, shutdown flush, revision-gated history compaction, revisioned backup rotation/retention, fail-closed automatic restore, and durable journal baselines verified locally and on three-OS CI/Java/sanitizers; and schema v4 media references, MIDI, device configuration, and plugin state verified locally and on three-OS CI/Java/sanitizers; media relink/restoration verified locally and on three-OS CI/sanitizers; device-configuration restoration decided and verified locally and on three-OS CI/sanitizers, with real WASAPI enumeration selecting a session's stored endpoint on Windows hardware and the audio callback measured on it at zero target/deadline misses (macOS/Linux enumeration absent); plugin state restoration moved to P0-013; macOS/Linux reference-hardware benchmarks accepted as out of scope for Phase 0 (R-13) |
+| P0-013 | Plugin process isolation | Not started; also owns plugin state restoration, moved from P0-012 because consuming a stored state blob requires a running plugin host |
 | P0-014 | Phase 0 exit review and Phase 1 backlog | Not started |
 
 ## Definition of done

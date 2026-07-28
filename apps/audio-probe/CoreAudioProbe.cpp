@@ -576,4 +576,25 @@ int run(const std::uint32_t secondsPerBuffer) {
     return exitCode;
 }
 
+// Core Audio enumeration is not implemented yet. Reporting unsupported is
+// deliberate: an empty inventory would be indistinguishable from a machine
+// with no audio hardware, and the resolver would then report a missing
+// backend for a session that is perfectly restorable here.
+DeviceInventory enumerateDevices() {
+    return {
+        .supported = false,
+        .devices = {},
+        .error = "Core Audio device enumeration is not implemented",
+    };
+}
+
+int runRestoredDevice(
+    const std::filesystem::path&,
+    const std::uint32_t
+) {
+    std::cerr
+        << "Core Audio device restoration is not implemented.\n";
+    return 3;
+}
+
 } // namespace iramix::audio_probe

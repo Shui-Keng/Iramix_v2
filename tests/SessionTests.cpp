@@ -91,6 +91,17 @@ makeReferenceSession() {
             .name = "Track " + std::to_string(index),
         });
     }
+    document.mediaSources.reserve(clipCount);
+    for (std::size_t index = 0U; index < clipCount; ++index) {
+        document.mediaSources.push_back({
+            .stableId = sourceBase + index,
+            .frameCount = 96'000U,
+            .sampleRate = 48'000U,
+            .channelCount = 2U,
+            .path = "media/source-" + std::to_string(index) + ".wav",
+            .name = "Source " + std::to_string(index),
+        });
+    }
     document.clips.reserve(clipCount);
     for (std::size_t index = 0U; index < clipCount; ++index) {
         document.clips.push_back({
@@ -817,17 +828,25 @@ void testAutomaticBackupRestore(
            "active_project_replacements=3\n";
 }
 
+// Virtual time, so the window is exact rather than a race against fsync.
+// The wall-clock value is arbitrary; nothing waits for it to elapse.
+constexpr std::chrono::milliseconds kAutosaveTestWindow {5'000};
+
 void testAutosaveScheduler(const std::filesystem::path& root) {
     const auto project = root / "autosave-session.irpx";
     std::string error;
     auto session =
         iramix::session::JournaledSession::open(project, error);
     require(session != nullptr, error.c_str());
+    auto clock =
+        std::make_shared<iramix::persistence::ManualAutosaveClock>();
     auto service =
         iramix::persistence::SessionPersistenceService::create(
             project,
-            std::chrono::milliseconds {30},
-            error
+            kAutosaveTestWindow,
+            error,
+            0U,
+            clock
         );
     require(service != nullptr, error.c_str());
     require(service->start(error), error.c_str());
@@ -842,7 +861,11 @@ void testAutosaveScheduler(const std::filesystem::path& root) {
             == iramix::persistence::AutosaveDirtyStatus::tracked,
         "first dirty revision starts a fixed autosave window"
     );
-    std::this_thread::sleep_for(std::chrono::milliseconds {5});
+    // Virtual time moves well short of the window, so however long the
+    // durable appends actually take, the deadline cannot pass between
+    // edits. The coalescing assertions now test the scheduler instead of
+    // racing it.
+    clock->advance(std::chrono::milliseconds {5});
     require(
         session->setTempo(2U, 122.0, error).applied(),
         "second autosave edit applies"
@@ -852,7 +875,7 @@ void testAutosaveScheduler(const std::filesystem::path& root) {
             == iramix::persistence::AutosaveDirtyStatus::replaced,
         "newer edit replaces the tracked autosave snapshot"
     );
-    std::this_thread::sleep_for(std::chrono::milliseconds {5});
+    clock->advance(std::chrono::milliseconds {5});
     require(
         session->setTempo(3U, 123.0, error).applied(),
         "third autosave edit applies"
@@ -862,9 +885,17 @@ void testAutosaveScheduler(const std::filesystem::path& root) {
             == iramix::persistence::AutosaveDirtyStatus::replaced,
         "continuous edits coalesce to the latest revision"
     );
+    require(
+        service->autosaveRequestCount() == 0U
+            && service->dirtyRevision() == 4U,
+        "the window has provably not fired before it is due"
+    );
+
+    // Cross the deadline exactly.
+    clock->advance(kAutosaveTestWindow);
 
     const auto timeout = std::chrono::steady_clock::now()
-        + std::chrono::seconds {5};
+        + std::chrono::seconds {10};
     auto query = service->query(4U);
     while (
         query.status
@@ -889,12 +920,18 @@ void testAutosaveScheduler(const std::filesystem::path& root) {
                     SessionSaveQueryStatus::committed
             && query.durableRevision == 4U
             && dirtyRevision == 0U
-            && autosaveRequests >= 1U
-            && autosaveRequests <= 3U
             && dirtyReplacements == 2U,
         "autosave commits the newest continuous-edit revision"
     );
-    require(elapsed < 1'000.0, "autosave fixed window does not starve");
+    // Exactly one window elapsed, so exactly one autosave was requested.
+    // Together with the zero-request check before the deadline, this is a
+    // stronger non-starvation proof than the wall-clock bound it replaced:
+    // three continuous edits provably did not push the deadline out, and
+    // the result no longer depends on how long an fsync takes.
+    require(
+        autosaveRequests == 1U,
+        "one elapsed window requests exactly one autosave"
+    );
     service->stop();
 
     const auto loaded =
@@ -943,10 +980,12 @@ void testAutosaveScheduler(const std::filesystem::path& root) {
     );
 
     std::cout
-        << "Autosave scheduler: interval_ms=30, edits=3, "
-           "autosave_requests=" << autosaveRequests
+        << "Autosave scheduler: virtual_window_ms="
+        << kAutosaveTestWindow.count()
+        << ", edits=3, requests_before_deadline=0"
+           ", autosave_requests=" << autosaveRequests
         << ", dirty_replacements=" << dirtyReplacements << ", "
-           "durable_revision=4, elapsed_ms=" << elapsed
+           "durable_revision=4, commit_wait_ms=" << elapsed
         << ", shutdown_flush_revision=2\n";
 }
 

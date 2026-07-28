@@ -1,7 +1,9 @@
 #include "iramix/persistence/AsyncProjectSaver.hpp"
 #include "iramix/persistence/AsyncSessionSaver.hpp"
 #include "iramix/persistence/CommandJournal.hpp"
+#include "iramix/persistence/DeviceResolver.hpp"
 #include "iramix/persistence/DiskAudioWorkers.hpp"
+#include "iramix/persistence/MediaResolver.hpp"
 #include "iramix/persistence/ProjectBackupStore.hpp"
 #include "iramix/persistence/ProjectStore.hpp"
 #include "iramix/persistence/RecoverableRecording.hpp"
@@ -23,6 +25,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #if defined(_WIN32)
@@ -356,6 +359,84 @@ void testSessionDocumentRoundTrip(
             .name = "Master",
         },
     };
+    source.mediaSources = {
+        {
+            .stableId = 50'001U,
+            .contentHash = 0xABCD'1234'5678'9ABCULL,
+            .frameCount = 480'000U,
+            .sampleRate = 96'000U,
+            .channelCount = 2U,
+            .path = "media/field-recording.wav",
+            .name = "Field recording",
+        },
+    };
+    source.midiSequences = {
+        {
+            .stableId = 50'002U,
+            .name = "Phrase",
+            .notes = {
+                {
+                    .startFrame = 0U,
+                    .lengthFrames = 12'000U,
+                    .channel = 0U,
+                    .key = 60U,
+                    .velocity = 0.8F,
+                },
+                {
+                    .startFrame = 0U,
+                    .lengthFrames = 12'000U,
+                    .channel = 0U,
+                    .key = 64U,
+                    .velocity = 0.7F,
+                },
+                {
+                    .startFrame = 24'000U,
+                    .lengthFrames = 6'000U,
+                    .channel = 1U,
+                    .key = 67U,
+                    .velocity = 1.0F,
+                },
+            },
+        },
+    };
+    source.device = {
+        .backend = iramix::persistence::SessionAudioBackend::asio,
+        .sampleRate = 96'000U,
+        .bufferFrames = 128U,
+        .inputChannelCount = 4U,
+        .outputChannelCount = 8U,
+        .inputDeviceId = "asio-input-0",
+        .outputDeviceId = "asio-output-0",
+    };
+    source.plugins = {
+        {
+            .stableId = 6'001U,
+            .targetTrackId = 205U,
+            .format =
+                iramix::persistence::SessionPluginFormat::clap,
+            .slotIndex = 0U,
+            .bypassed = false,
+            .identifier = "com.iramix.reverb",
+            .name = "Hall",
+            .state = {
+                std::byte {0x01U},
+                std::byte {0xFFU},
+                std::byte {0x00U},
+                std::byte {0x7FU},
+            },
+        },
+        {
+            .stableId = 6'002U,
+            .targetTrackId = 205U,
+            .format =
+                iramix::persistence::SessionPluginFormat::vst3,
+            .slotIndex = 1U,
+            .bypassed = true,
+            .identifier = "com.iramix.compressor",
+            .name = "Bus glue",
+            .state = {},
+        },
+    };
     source.clips = {
         {
             .stableId = 2'001U,
@@ -441,11 +522,44 @@ void testSessionDocumentRoundTrip(
                 == 3U,
         "current session schema round trips deterministically"
     );
+    require(
+        decoded.document.mediaSources.size() == 1U
+            && decoded.document.mediaSources[0].path
+                == "media/field-recording.wav"
+            && decoded.document.mediaSources[0].contentHash
+                == 0xABCD'1234'5678'9ABCULL
+            && decoded.document.mediaSources[0].frameCount
+                == 480'000U
+            && decoded.document.mediaSources[0].channelCount == 2U
+            && decoded.document.midiSequences.size() == 1U
+            && decoded.document.midiSequences[0].notes.size() == 3U
+            && decoded.document.midiSequences[0].notes[2].channel
+                == 1U
+            && decoded.document.midiSequences[0].notes[2].key == 67U
+            && decoded.document.device.backend
+                == iramix::persistence::SessionAudioBackend::asio
+            && decoded.document.device.bufferFrames == 128U
+            && decoded.document.device.outputDeviceId
+                == "asio-output-0"
+            && decoded.document.plugins.size() == 2U
+            && decoded.document.plugins[0].identifier
+                == "com.iramix.reverb"
+            && decoded.document.plugins[0].state.size() == 4U
+            && decoded.document.plugins[0].state[3]
+                == std::byte {0x7FU}
+            && decoded.document.plugins[1].bypassed
+            && decoded.document.plugins[1].state.empty(),
+        "media, MIDI, device, and plugin state round trip intact"
+    );
 
     auto legacySource = source;
     legacySource.clips.clear();
     legacySource.routes.clear();
     legacySource.automationLanes.clear();
+    legacySource.mediaSources.clear();
+    legacySource.midiSequences.clear();
+    legacySource.plugins.clear();
+    legacySource.device = {};
     const auto legacyBytes =
         iramix::persistence::serializeSessionDocument(
             legacySource,
@@ -499,6 +613,52 @@ void testSessionDocumentRoundTrip(
             2U
         ).empty(),
         "lossy export to schema v2 is rejected"
+    );
+
+    auto schemaV3Source = source;
+    schemaV3Source.midiSequences.clear();
+    schemaV3Source.plugins.clear();
+    schemaV3Source.device = {};
+    schemaV3Source.mediaSources.clear();
+    for (const auto& clip : schemaV3Source.clips) {
+        iramix::persistence::SessionMediaSource placeholder;
+        placeholder.stableId = clip.sourceId;
+        schemaV3Source.mediaSources.push_back(placeholder);
+    }
+    const auto schemaV3Bytes =
+        iramix::persistence::serializeSessionDocument(
+            schemaV3Source,
+            error,
+            3U
+        );
+    require(!schemaV3Bytes.empty(), error.c_str());
+    decoded =
+        iramix::persistence::deserializeSessionDocument(
+            schemaV3Bytes
+        );
+    require(
+        decoded.ok()
+            && decoded.sourceSchemaVersion == 3U
+            && decoded.migrated
+            && decoded.document.clips.size() == 2U
+            && decoded.document.mediaSources.size() == 2U
+            && decoded.document.mediaSources[0].stableId == 50'001U
+            && decoded.document.mediaSources[0].path.empty()
+            && decoded.document.mediaSources[1].stableId == 50'002U
+            && decoded.document.midiSequences.empty()
+            && decoded.document.plugins.empty()
+            && decoded.document.device.backend
+                == iramix::persistence::SessionAudioBackend
+                    ::unspecified,
+        "schema v3 migrates clip sources to unresolved media placeholders"
+    );
+    require(
+        iramix::persistence::serializeSessionDocument(
+            source,
+            error,
+            3U
+        ).empty(),
+        "lossy export to schema v3 is rejected"
     );
 
     const auto project = root / "session-round-trip.irpx";
@@ -558,11 +718,564 @@ void testSessionDocumentRoundTrip(
         "dangling session references are rejected"
     );
 
+    auto danglingSource = source;
+    danglingSource.clips[0].sourceId = 987'654U;
+    require(
+        iramix::persistence::serializeSessionDocument(
+            danglingSource,
+            error
+        ).empty(),
+        "clips referencing an undeclared source are rejected"
+    );
+    auto unorderedNotes = source;
+    std::swap(
+        unorderedNotes.midiSequences[0].notes[0],
+        unorderedNotes.midiSequences[0].notes[1]
+    );
+    require(
+        iramix::persistence::serializeSessionDocument(
+            unorderedNotes,
+            error
+        ).empty(),
+        "unordered MIDI notes are rejected"
+    );
+    auto invalidVelocity = source;
+    invalidVelocity.midiSequences[0].notes[0].velocity = 1.5F;
+    require(
+        iramix::persistence::serializeSessionDocument(
+            invalidVelocity,
+            error
+        ).empty(),
+        "out-of-range MIDI velocity is rejected"
+    );
+    auto duplicateSlot = source;
+    duplicateSlot.plugins[1].slotIndex =
+        duplicateSlot.plugins[0].slotIndex;
+    require(
+        iramix::persistence::serializeSessionDocument(
+            duplicateSlot,
+            error
+        ).empty(),
+        "duplicate plugin slots on one track are rejected"
+    );
+    auto anonymousPlugin = source;
+    anonymousPlugin.plugins[0].identifier.clear();
+    require(
+        iramix::persistence::serializeSessionDocument(
+            anonymousPlugin,
+            error
+        ).empty(),
+        "plugins without a restorable identifier are rejected"
+    );
+    auto backendlessDevice = source;
+    backendlessDevice.device.backend =
+        iramix::persistence::SessionAudioBackend::unspecified;
+    require(
+        iramix::persistence::serializeSessionDocument(
+            backendlessDevice,
+            error
+        ).empty(),
+        "device IDs without a backend are rejected"
+    );
+    auto oversizedBuffer = source;
+    oversizedBuffer.device.bufferFrames = 1'000'000U;
+    require(
+        iramix::persistence::serializeSessionDocument(
+            oversizedBuffer,
+            error
+        ).empty(),
+        "out-of-range device buffer sizes are rejected"
+    );
+
+    auto truncated = currentBytes;
+    truncated.pop_back();
+    require(
+        !iramix::persistence::deserializeSessionDocument(truncated)
+             .ok(),
+        "truncated schema v4 input is rejected"
+    );
+
     std::cout
-        << "Session document: current_schema=3, tracks=3, "
+        << "Session document: current_schema=4, tracks=3, "
            "clips=2, routes=1, automation_lanes=1, "
-           "v1_migrations=1, v2_migrations=1, "
+           "media_sources=1, midi_sequences=1, midi_notes=3, "
+           "plugins=2, plugin_state_bytes=4, "
+           "v1_migrations=1, v2_migrations=1, v3_migrations=1, "
            "unknown_schemas_rejected=1, project_round_trips=1\n";
+}
+
+void writeMediaFile(
+    const std::filesystem::path& path,
+    const std::string_view contents
+) {
+    std::filesystem::create_directories(path.parent_path());
+    std::ofstream stream {path, std::ios::binary};
+    require(stream.is_open(), "media fixture opens for writing");
+    stream.write(contents.data(),
+        static_cast<std::streamsize>(contents.size()));
+    stream.close();
+    require(!stream.fail(), "media fixture is written");
+}
+
+[[nodiscard]] iramix::persistence::MediaResolutionStatus statusOf(
+    const iramix::persistence::MediaResolutionReport& report,
+    const std::uint64_t sourceId
+) {
+    const auto entry = std::find_if(
+        report.resolutions.begin(),
+        report.resolutions.end(),
+        [sourceId](
+            const iramix::persistence::MediaResolution& candidate
+        ) {
+            return candidate.sourceId == sourceId;
+        }
+    );
+    require(
+        entry != report.resolutions.end(),
+        "every media source appears in the resolution report"
+    );
+    return entry->status;
+}
+
+void testMediaResolution(const std::filesystem::path& root) {
+    namespace persistence = iramix::persistence;
+
+    const auto projectRoot = root / "relink-project";
+    const auto vaultRoot = root / "relink-vault";
+    std::filesystem::create_directories(projectRoot);
+    std::filesystem::create_directories(vaultRoot);
+
+    writeMediaFile(projectRoot / "media" / "intact.wav", "INTACT-AUDIO");
+    writeMediaFile(
+        projectRoot / "media" / "replaced.wav",
+        "A DIFFERENT TAKE ENTIRELY"
+    );
+    writeMediaFile(projectRoot / "media" / "unhashed.wav", "NO HASH");
+    writeMediaFile(
+        vaultRoot / "archive" / "moved.wav",
+        "MOVED-AUDIO-PAYLOAD"
+    );
+
+    std::string hashError;
+    std::uint64_t hashedBytes = 0U;
+    const auto intactHash = persistence::hashMediaFile(
+        projectRoot / "media" / "intact.wav",
+        persistence::defaultMaximumHashBytes,
+        hashedBytes,
+        hashError
+    );
+    require(hashError.empty(), hashError.c_str());
+    require(
+        intactHash != 0U && hashedBytes == 12U,
+        "media hashing reports content hash and byte count"
+    );
+    const auto movedHash = persistence::hashMediaFile(
+        vaultRoot / "archive" / "moved.wav",
+        persistence::defaultMaximumHashBytes,
+        hashedBytes,
+        hashError
+    );
+    require(hashError.empty(), hashError.c_str());
+    require(
+        movedHash != intactHash,
+        "distinct media content produces distinct hashes"
+    );
+
+    persistence::SessionDocument document;
+    document.revision = 1U;
+    document.tracks = {
+        {
+            .stableId = 1U,
+            .type = persistence::SessionTrackType::audio,
+            .gain = 1.0F,
+            .color = 0U,
+            .name = "Audio",
+        },
+    };
+    document.mediaSources = {
+        {
+            .stableId = 10U,
+            .contentHash = intactHash,
+            .frameCount = 0U,
+            .sampleRate = 48'000U,
+            .channelCount = 2U,
+            .path = "media/intact.wav",
+            .name = "Intact",
+        },
+        {
+            .stableId = 11U,
+            .contentHash = intactHash,
+            .frameCount = 0U,
+            .sampleRate = 48'000U,
+            .channelCount = 2U,
+            .path = "media/replaced.wav",
+            .name = "Replaced",
+        },
+        {
+            .stableId = 12U,
+            .contentHash = movedHash,
+            .frameCount = 0U,
+            .sampleRate = 48'000U,
+            .channelCount = 2U,
+            .path = "media/moved.wav",
+            .name = "Moved",
+        },
+        {
+            .stableId = 13U,
+            .contentHash = 0U,
+            .frameCount = 0U,
+            .sampleRate = 0U,
+            .channelCount = 0U,
+            .path = "media/unhashed.wav",
+            .name = "Unhashed",
+        },
+        {
+            .stableId = 14U,
+            .contentHash = 0xDEAD'BEEF'0000'0001ULL,
+            .frameCount = 0U,
+            .sampleRate = 48'000U,
+            .channelCount = 2U,
+            .path = "media/gone.wav",
+            .name = "Gone",
+        },
+    };
+    // A schema v3 migration placeholder: an identity with nothing to
+    // search for.
+    persistence::SessionMediaSource placeholder;
+    placeholder.stableId = 15U;
+    document.mediaSources.push_back(placeholder);
+
+    std::uint64_t clipId = 100U;
+    for (const auto& source : document.mediaSources) {
+        document.clips.push_back({
+            .stableId = clipId++,
+            .trackId = 1U,
+            .sourceId = source.stableId,
+            .startFrame = 0U,
+            .lengthFrames = 1'000U,
+            .sourceOffsetFrames = 0U,
+            .gain = 1.0F,
+            .muted = false,
+            .name = "Clip",
+        });
+    }
+
+    const persistence::MediaResolverConfig config {
+        .projectRoot = projectRoot,
+        .searchDirectories = {vaultRoot},
+        .maximumHashBytes = persistence::defaultMaximumHashBytes,
+        .maximumSearchEntries =
+            persistence::defaultMaximumSearchEntries,
+    };
+    const auto report =
+        persistence::resolveSessionMedia(document, config);
+
+    require(
+        report.resolutions.size() == 6U
+            && report.verifiedCount == 1U
+            && report.mismatchedCount == 1U
+            && report.relocatedCount == 1U
+            && report.unverifiableCount == 1U
+            && report.missingCount == 2U
+            && !report.complete(),
+        "media resolution classifies every source"
+    );
+    require(
+        statusOf(report, 10U)
+                == persistence::MediaResolutionStatus::verified
+            && statusOf(report, 11U)
+                == persistence::MediaResolutionStatus::mismatched
+            && statusOf(report, 12U)
+                == persistence::MediaResolutionStatus::relocated
+            && statusOf(report, 13U)
+                == persistence::MediaResolutionStatus::unverifiable
+            && statusOf(report, 14U)
+                == persistence::MediaResolutionStatus::missing
+            && statusOf(report, 15U)
+                == persistence::MediaResolutionStatus::missing,
+        "media resolution statuses are individually correct"
+    );
+
+    auto relinked = document;
+    const auto applied =
+        persistence::applyMediaResolution(relinked, report, config);
+    require(applied == 1U, "only relocations rewrite the document");
+    require(
+        relinked.mediaSources[0].path == "media/intact.wav"
+            && relinked.mediaSources[1].path == "media/replaced.wav"
+            && relinked.mediaSources[3].path == "media/unhashed.wav"
+            && relinked.mediaSources[4].path == "media/gone.wav"
+            && relinked.mediaSources[5].path.empty(),
+        "mismatched and missing sources are left untouched"
+    );
+    require(
+        relinked.mediaSources[2].path
+            != document.mediaSources[2].path,
+        "the relocated source adopts the located path"
+    );
+
+    std::string error;
+    require(
+        !persistence::serializeSessionDocument(relinked, error)
+             .empty(),
+        error.c_str()
+    );
+
+    // The relinked path must resolve on a later open from the same root.
+    const auto reresolved =
+        persistence::resolveSessionMedia(relinked, config);
+    require(
+        reresolved.verifiedCount == 2U
+            && reresolved.relocatedCount == 0U,
+        "a relinked source verifies directly on the next open"
+    );
+
+    // Two files sharing their first maximumHashBytes but differing in
+    // length must not hash alike, or a change past the bound would be
+    // read as the same take.
+    const auto boundedA = root / "bounded-a.wav";
+    const auto boundedB = root / "bounded-b.wav";
+    writeMediaFile(boundedA, "PREFIX--TAIL");
+    writeMediaFile(boundedB, "PREFIX--TAIL-EXTENDED");
+    std::uint64_t boundedBytesA = 0U;
+    std::uint64_t boundedBytesB = 0U;
+    const auto boundedHashA = persistence::hashMediaFile(
+        boundedA,
+        8U,
+        boundedBytesA,
+        hashError
+    );
+    require(hashError.empty(), hashError.c_str());
+    const auto boundedHashB = persistence::hashMediaFile(
+        boundedB,
+        8U,
+        boundedBytesB,
+        hashError
+    );
+    require(hashError.empty(), hashError.c_str());
+    require(
+        boundedBytesA == 8U && boundedBytesB == 8U
+            && boundedHashA != boundedHashB,
+        "content changes past the hash bound still separate"
+    );
+
+    // Replacing a verified file's content flips it to mismatched.
+    writeMediaFile(projectRoot / "media" / "intact.wav", "OTHER-AUDIO!");
+    const auto afterReplacement =
+        persistence::resolveSessionMedia(document, config);
+    require(
+        statusOf(afterReplacement, 10U)
+            == persistence::MediaResolutionStatus::mismatched,
+        "a replaced media file fails verification"
+    );
+
+    std::string missingError;
+    std::uint64_t missingBytes = 0U;
+    require(
+        persistence::hashMediaFile(
+            projectRoot / "media" / "absent.wav",
+            persistence::defaultMaximumHashBytes,
+            missingBytes,
+            missingError
+        ) == 0U
+            && !missingError.empty(),
+        "hashing an absent media file reports an error"
+    );
+
+    std::cout
+        << "Media resolution: sources=6, verified=1, mismatched=1, "
+           "relocated=1, unverifiable=1, missing=2, applied=1, "
+           "search_entries=" << report.searchEntriesScanned
+        << ", budget_exhausted="
+        << (report.searchBudgetExhausted ? 1 : 0)
+        << ", bounded_length_separations=1, replacements_detected=1, "
+           "unreadable_files_rejected=1\n";
+}
+
+void testDeviceResolution() {
+    namespace persistence = iramix::persistence;
+
+    const std::vector<persistence::AvailableAudioDevice> inventory {
+        {
+            .backend = persistence::SessionAudioBackend::wasapi,
+            .deviceId = "wasapi-out-0",
+            .name = "Speakers",
+            .supportedSampleRates = {44'100U, 48'000U, 96'000U},
+            .minimumBufferFrames = 64U,
+            .maximumBufferFrames = 2'048U,
+            .inputChannelCount = 0U,
+            .outputChannelCount = 2U,
+        },
+        {
+            .backend = persistence::SessionAudioBackend::wasapi,
+            .deviceId = "wasapi-in-0",
+            .name = "Microphone",
+            .supportedSampleRates = {44'100U, 48'000U},
+            .minimumBufferFrames = 64U,
+            .maximumBufferFrames = 2'048U,
+            .inputChannelCount = 2U,
+            .outputChannelCount = 0U,
+        },
+        {
+            .backend = persistence::SessionAudioBackend::asio,
+            .deviceId = "asio-interface",
+            .name = "Studio Interface",
+            .supportedSampleRates = {48'000U, 96'000U, 192'000U},
+            .minimumBufferFrames = 32U,
+            .maximumBufferFrames = 1'024U,
+            .inputChannelCount = 8U,
+            .outputChannelCount = 8U,
+        },
+    };
+
+    const persistence::SessionDeviceConfiguration exact {
+        .backend = persistence::SessionAudioBackend::asio,
+        .sampleRate = 96'000U,
+        .bufferFrames = 128U,
+        .inputChannelCount = 8U,
+        .outputChannelCount = 8U,
+        .inputDeviceId = "asio-interface",
+        .outputDeviceId = "asio-interface",
+    };
+    auto resolution =
+        persistence::resolveDeviceConfiguration(exact, inventory);
+    require(
+        resolution.status
+                == persistence::DeviceResolutionStatus::restored
+            && resolution.openable()
+            && resolution.reason.empty()
+            && resolution.resolved.sampleRate == 96'000U
+            && resolution.resolved.bufferFrames == 128U
+            && resolution.resolved.outputChannelCount == 8U
+            && resolution.resolved.inputDeviceId == "asio-interface",
+        "an exactly available device restores unchanged"
+    );
+
+    auto renegotiated = exact;
+    renegotiated.sampleRate = 88'200U;
+    renegotiated.bufferFrames = 4'096U;
+    renegotiated.outputChannelCount = 32U;
+    resolution = persistence::resolveDeviceConfiguration(
+        renegotiated,
+        inventory
+    );
+    require(
+        resolution.status
+                == persistence::DeviceResolutionStatus::adjusted
+            && resolution.sampleRateAdjusted
+            && resolution.bufferFramesAdjusted
+            && resolution.channelCountAdjusted
+            && resolution.resolved.sampleRate == 96'000U
+            && resolution.resolved.bufferFrames == 1'024U
+            && resolution.resolved.outputChannelCount == 8U
+            && !resolution.reason.empty(),
+        "unsupported rate, buffer, and channel count renegotiate"
+    );
+
+    // 72'000 sits exactly between the supported 48'000 and 96'000, so it
+    // pins the documented tie-break rather than the nearest-rate rule.
+    auto tie = exact;
+    tie.sampleRate = 72'000U;
+    resolution =
+        persistence::resolveDeviceConfiguration(tie, inventory);
+    require(
+        resolution.resolved.sampleRate == 96'000U,
+        "an equidistant sample rate resolves to the higher option"
+    );
+
+    auto movedMachine = exact;
+    movedMachine.outputDeviceId = "asio-retired-unit";
+    resolution = persistence::resolveDeviceConfiguration(
+        movedMachine,
+        inventory
+    );
+    require(
+        resolution.status
+                == persistence::DeviceResolutionStatus::substituted
+            && resolution.outputDeviceSubstituted
+            && resolution.resolved.outputDeviceId
+                == "asio-interface"
+            && resolution.openable(),
+        "an absent output device substitutes the backend default"
+    );
+
+    auto captureGone = exact;
+    captureGone.inputDeviceId = "asio-retired-input";
+    resolution = persistence::resolveDeviceConfiguration(
+        captureGone,
+        inventory
+    );
+    require(
+        resolution.status
+                == persistence::DeviceResolutionStatus::substituted
+            && resolution.inputDeviceSubstituted
+            && resolution.resolved.inputDeviceId.empty()
+            && resolution.resolved.inputChannelCount == 0U
+            && resolution.resolved.outputDeviceId
+                == "asio-interface",
+        "an absent input device continues without capture"
+    );
+
+    const persistence::SessionDeviceConfiguration foreignBackend {
+        .backend = persistence::SessionAudioBackend::coreAudio,
+        .sampleRate = 48'000U,
+        .bufferFrames = 256U,
+        .inputChannelCount = 2U,
+        .outputChannelCount = 2U,
+        .inputDeviceId = "core-in",
+        .outputDeviceId = "core-out",
+    };
+    resolution = persistence::resolveDeviceConfiguration(
+        foreignBackend,
+        inventory
+    );
+    require(
+        resolution.status
+                == persistence::DeviceResolutionStatus
+                    ::unavailableBackend
+            && !resolution.openable()
+            && resolution.resolved.backend
+                == persistence::SessionAudioBackend::unspecified
+            && resolution.resolved.outputDeviceId.empty(),
+        "a session never migrates to a different audio backend"
+    );
+
+    resolution = persistence::resolveDeviceConfiguration({}, inventory);
+    require(
+        resolution.status
+                == persistence::DeviceResolutionStatus::unconfigured
+            && !resolution.openable()
+            && resolution.resolved.outputDeviceId.empty(),
+        "a session without a device configuration selects nothing"
+    );
+
+    // A resolution must be storable again without tripping validation.
+    persistence::SessionDocument document;
+    document.revision = 1U;
+    document.tracks = {
+        {
+            .stableId = 1U,
+            .type = persistence::SessionTrackType::master,
+            .gain = 1.0F,
+            .color = 0U,
+            .name = "Master",
+        },
+    };
+    document.device = persistence::resolveDeviceConfiguration(
+        movedMachine,
+        inventory
+    ).resolved;
+    std::string error;
+    require(
+        !persistence::serializeSessionDocument(document, error)
+             .empty(),
+        error.c_str()
+    );
+
+    std::cout
+        << "Device resolution: devices=3, restored=1, adjusted=1, "
+           "substituted=2, unavailable_backends=1, unconfigured=1, "
+           "rate_ties_resolved=1, reserialized=1\n";
 }
 
 void testAsyncProjectSaver(
@@ -821,15 +1534,30 @@ makeReferenceSession() {
     constexpr std::uint64_t routeBase = 200'000U;
     constexpr std::uint64_t automationBase = 300'000U;
     constexpr std::uint64_t sourceBase = 1'000'000U;
+    constexpr std::uint64_t pluginBase = 2'000'000U;
     constexpr std::size_t trackCount = 200U;
     constexpr std::size_t clipCount = 2'000U;
+    constexpr std::size_t audioClipCount = 1'500U;
+    constexpr std::size_t midiSequenceCount =
+        clipCount - audioClipCount;
+    constexpr std::size_t notesPerSequence = 200U;
     constexpr std::size_t automationLaneCount = 40U;
     constexpr std::size_t pointsPerLane = 1'000U;
+    constexpr std::size_t pluginStateBytes = 4'096U;
 
     iramix::persistence::SessionDocument document;
     document.revision = 10'000U;
     document.sampleRate = 48'000U;
     document.tempo = 128.0;
+    document.device = {
+        .backend = iramix::persistence::SessionAudioBackend::wasapi,
+        .sampleRate = 48'000U,
+        .bufferFrames = 256U,
+        .inputChannelCount = 2U,
+        .outputChannelCount = 2U,
+        .inputDeviceId = "reference-input-device",
+        .outputDeviceId = "reference-output-device",
+    };
     document.tracks.reserve(trackCount);
     for (std::size_t index = 0U; index < trackCount; ++index) {
         document.tracks.push_back({
@@ -845,6 +1573,51 @@ makeReferenceSession() {
                 + static_cast<std::uint32_t>(index),
             .name = "Reference track " + std::to_string(index),
         });
+    }
+
+    document.mediaSources.reserve(audioClipCount);
+    for (std::size_t index = 0U; index < audioClipCount; ++index) {
+        document.mediaSources.push_back({
+            .stableId = sourceBase + index,
+            .contentHash = 0x5EED'0000'0000'0000ULL
+                + static_cast<std::uint64_t>(index),
+            .frameCount = 96'000U,
+            .sampleRate = 48'000U,
+            .channelCount = 2U,
+            .path = "media/reference-" + std::to_string(index)
+                + ".wav",
+            .name = "Reference media " + std::to_string(index),
+        });
+    }
+
+    document.midiSequences.reserve(midiSequenceCount);
+    for (
+        std::size_t index = 0U;
+        index < midiSequenceCount;
+        ++index
+    ) {
+        iramix::persistence::SessionMidiSequence sequence;
+        sequence.stableId = sourceBase + audioClipCount + index;
+        sequence.name = "Reference MIDI " + std::to_string(index);
+        sequence.notes.reserve(notesPerSequence);
+        for (
+            std::size_t noteIndex = 0U;
+            noteIndex < notesPerSequence;
+            ++noteIndex
+        ) {
+            sequence.notes.push_back({
+                .startFrame =
+                    static_cast<std::uint64_t>(noteIndex) * 6'000U,
+                .lengthFrames = 4'800U,
+                .channel = 0U,
+                .key = static_cast<std::uint32_t>(
+                    36U + noteIndex % 48U
+                ),
+                .velocity = 0.5F
+                    + static_cast<float>(noteIndex % 50U) / 100.0F,
+            });
+        }
+        document.midiSequences.push_back(std::move(sequence));
     }
 
     document.clips.reserve(clipCount);
@@ -902,6 +1675,26 @@ makeReferenceSession() {
             });
         }
         document.automationLanes.push_back(std::move(lane));
+    }
+
+    document.plugins.reserve(trackCount);
+    for (std::size_t index = 0U; index < trackCount; ++index) {
+        document.plugins.push_back({
+            .stableId = pluginBase + index,
+            .targetTrackId = trackBase + index,
+            .format = index % 2U == 0U
+                ? iramix::persistence::SessionPluginFormat::clap
+                : iramix::persistence::SessionPluginFormat::vst3,
+            .slotIndex = 0U,
+            .bypassed = index % 13U == 0U,
+            .identifier = "com.iramix.reference.plugin."
+                + std::to_string(index),
+            .name = "Reference plugin " + std::to_string(index),
+            .state = std::vector<std::byte>(
+                pluginStateBytes,
+                static_cast<std::byte>(index % 251U)
+            ),
+        });
     }
     return document;
 }
@@ -1030,6 +1823,9 @@ void testReferenceProjectBenchmark(
     std::cout
         << "Reference project: tracks=200, clips=2000, routes=199, "
            "automation_lanes=40, automation_points=40000, "
+           "media_sources=1500, midi_sequences=500, "
+           "midi_notes=100000, plugins=200, "
+           "plugin_state_bytes=819200, "
            "project_bytes=" << projectBytes
         << ", iterations=" << benchmarkIterations
         << ", serialize_p50_ms=" << serializeP50
@@ -1892,6 +2688,8 @@ int main(const int argc, char* argv[]) {
     testAtomicProjectStore(temporary.path());
     testProjectBackupRotation(temporary.path());
     testSessionDocumentRoundTrip(temporary.path());
+    testMediaResolution(temporary.path());
+    testDeviceResolution();
     testAsyncProjectSaver(temporary.path());
     testReferenceProjectBenchmark(temporary.path());
     testAsyncSessionSaver(temporary.path());

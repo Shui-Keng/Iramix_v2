@@ -89,16 +89,59 @@ dead_branch_records_removed=6, stable_revision=10,
 original_bytes=800, compacted_bytes=200,
 checkpoint_ms=4.8606
 
-Autosave scheduler: interval_ms=30, edits=3,
-autosave_requests=1, dirty_replacements=2,
-durable_revision=4, elapsed_ms=56.9689,
-shutdown_flush_revision=2
+Autosave scheduler: virtual_window_ms=5000, edits=3,
+requests_before_deadline=0, autosave_requests=1,
+dirty_replacements=2, durable_revision=4,
+commit_wait_ms=56.3957, shutdown_flush_revision=2
 ```
 
-The fixed window is not a trailing debounce. On slower GCC runs, the durable
-edit sequence crossed the first 30 ms deadline, so revision 3 used one
-autosave window and revision 4 used a second. This is expected bounded behavior
-and prevents continuous editing from starving persistence.
+The fixed window is not a trailing debounce, and the test now proves that
+exactly rather than approximately: zero autosaves are requested while the
+deadline is pending, and exactly one is requested after a single window
+elapses. Three continuous edits provably did not push the deadline out.
+
+### Deterministic scheduling under test
+
+The autosave deadline is driven by an injected `AutosaveClock`. Production
+uses `SteadyAutosaveClock`, where virtual time is real time and behavior is
+unchanged. Tests use `ManualAutosaveClock`, which advances only when
+`advance()` is called and then wakes the service worker.
+
+This replaced a wall-clock test that was structurally unable to be
+reliable. The original 30 ms window was shorter than three durable journal
+appends on macOS: the window fired between edits, the third `markDirty`
+opened a new window instead of replacing a pending one — correct scheduler
+behavior — and the coalescing assertions raced the worker rather than
+testing it. Windows and Linux happened to finish the appends in time;
+macOS CI failed twice in a row on commits that touched no session code.
+An interim fix widened the window to 500 ms, which made the race unlikely
+but not impossible, and cost half a second of real waiting per run.
+
+With virtual time the window is exact, the assertions are stronger
+(`autosave_requests == 1` rather than a `>= 1 && <= 3` range, plus a
+zero-request check before the deadline), the result no longer depends on
+fsync latency on any platform, and the test runs in ~56 ms of real time
+instead of ~571 ms. Eight consecutive local runs produced identical
+counters.
+
+Only deadline waiting moved into the clock's domain. Coordinator polling
+still waits in real time, because the save worker performs real disk I/O on
+another thread and that latency is not something a test should pretend
+away. `commit_wait_ms` above is that real durable-save latency, not a
+window measurement.
+
+Confirmed on GitHub Actions run
+[`30358009100`](https://github.com/Shui-Keng/Iramix_v2/actions/runs/30358009100):
+all five jobs green. The macOS session suite — the platform that exposed
+the original race — now runs in **0.15 s**, against 0.70–0.79 s under the
+500 ms wall-clock window and a failure before that. TSan passing matters
+here specifically: the manual clock notifies the service worker across
+threads, so a race in the observer or condition-variable handling would
+surface there rather than as a silent flake.
+
+**No scheduler behavior was changed.** The earlier 30 ms and 500 ms figures
+have been replaced rather than kept, because they were measured against a
+window the test no longer uses.
 
 One manual binary IPC smoke used the Debug engine with a 50 ms interval:
 
