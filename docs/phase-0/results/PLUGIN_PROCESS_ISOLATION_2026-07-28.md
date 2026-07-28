@@ -87,6 +87,29 @@ child), and zero surviving children three seconds after the host was
 killed. Without this a crashed host leaves a blocked child behind, which
 in CI is an indefinitely hung job rather than a failed one.
 
+## CI and sanitizer results
+
+GitHub Actions:
+[`30365023302`](https://github.com/Shui-Keng/Iramix_v2/actions/runs/30365023302)
+
+All five jobs passed. ASan/UBSan and TSan matter more than usual here: the
+bridge maps atomics into a region two processes write, forks and execs a
+child, and detaches a watchdog thread. A race in the sequence protocol
+would surface in TSan rather than as an occasional dropped block.
+
+One macOS-only failure was fixed on the way. macOS caps POSIX
+shared-memory and semaphore names at 31 characters including the leading
+slash; the semaphore name was 33, so `sem_open` failed there while Linux
+and Windows, which have no such limit, passed. macOS reports nothing more
+specific than a failed open. Both names are now derived from a short hex
+token, and the child derives them the same way from the token it is given
+rather than being handed a pre-built path.
+
+This is the third failure this project has hit of the same shape — a
+construct that compiles and runs on the one local toolchain and fails
+elsewhere, after `std::uintmax_t` on macOS and Windows SDK header order on
+MSVC. The pattern is recorded in `CLAUDE.md`.
+
 ## Evidence boundary
 
 This proves the bridge contract — bounded wait, silence on failure, host
