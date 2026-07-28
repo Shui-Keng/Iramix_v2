@@ -2,6 +2,7 @@
 #include "iramix/persistence/AsyncSessionSaver.hpp"
 #include "iramix/persistence/CommandJournal.hpp"
 #include "iramix/persistence/DiskAudioWorkers.hpp"
+#include "iramix/persistence/MediaResolver.hpp"
 #include "iramix/persistence/ProjectBackupStore.hpp"
 #include "iramix/persistence/ProjectStore.hpp"
 #include "iramix/persistence/RecoverableRecording.hpp"
@@ -800,6 +801,294 @@ void testSessionDocumentRoundTrip(
            "plugins=2, plugin_state_bytes=4, "
            "v1_migrations=1, v2_migrations=1, v3_migrations=1, "
            "unknown_schemas_rejected=1, project_round_trips=1\n";
+}
+
+void writeMediaFile(
+    const std::filesystem::path& path,
+    const std::string_view contents
+) {
+    std::filesystem::create_directories(path.parent_path());
+    std::ofstream stream {path, std::ios::binary};
+    require(stream.is_open(), "media fixture opens for writing");
+    stream.write(contents.data(),
+        static_cast<std::streamsize>(contents.size()));
+    stream.close();
+    require(!stream.fail(), "media fixture is written");
+}
+
+[[nodiscard]] iramix::persistence::MediaResolutionStatus statusOf(
+    const iramix::persistence::MediaResolutionReport& report,
+    const std::uint64_t sourceId
+) {
+    const auto entry = std::find_if(
+        report.resolutions.begin(),
+        report.resolutions.end(),
+        [sourceId](
+            const iramix::persistence::MediaResolution& candidate
+        ) {
+            return candidate.sourceId == sourceId;
+        }
+    );
+    require(
+        entry != report.resolutions.end(),
+        "every media source appears in the resolution report"
+    );
+    return entry->status;
+}
+
+void testMediaResolution(const std::filesystem::path& root) {
+    namespace persistence = iramix::persistence;
+
+    const auto projectRoot = root / "relink-project";
+    const auto vaultRoot = root / "relink-vault";
+    std::filesystem::create_directories(projectRoot);
+    std::filesystem::create_directories(vaultRoot);
+
+    writeMediaFile(projectRoot / "media" / "intact.wav", "INTACT-AUDIO");
+    writeMediaFile(
+        projectRoot / "media" / "replaced.wav",
+        "A DIFFERENT TAKE ENTIRELY"
+    );
+    writeMediaFile(projectRoot / "media" / "unhashed.wav", "NO HASH");
+    writeMediaFile(
+        vaultRoot / "archive" / "moved.wav",
+        "MOVED-AUDIO-PAYLOAD"
+    );
+
+    std::string hashError;
+    std::uint64_t hashedBytes = 0U;
+    const auto intactHash = persistence::hashMediaFile(
+        projectRoot / "media" / "intact.wav",
+        persistence::defaultMaximumHashBytes,
+        hashedBytes,
+        hashError
+    );
+    require(hashError.empty(), hashError.c_str());
+    require(
+        intactHash != 0U && hashedBytes == 12U,
+        "media hashing reports content hash and byte count"
+    );
+    const auto movedHash = persistence::hashMediaFile(
+        vaultRoot / "archive" / "moved.wav",
+        persistence::defaultMaximumHashBytes,
+        hashedBytes,
+        hashError
+    );
+    require(hashError.empty(), hashError.c_str());
+    require(
+        movedHash != intactHash,
+        "distinct media content produces distinct hashes"
+    );
+
+    persistence::SessionDocument document;
+    document.revision = 1U;
+    document.tracks = {
+        {
+            .stableId = 1U,
+            .type = persistence::SessionTrackType::audio,
+            .gain = 1.0F,
+            .color = 0U,
+            .name = "Audio",
+        },
+    };
+    document.mediaSources = {
+        {
+            .stableId = 10U,
+            .contentHash = intactHash,
+            .frameCount = 0U,
+            .sampleRate = 48'000U,
+            .channelCount = 2U,
+            .path = "media/intact.wav",
+            .name = "Intact",
+        },
+        {
+            .stableId = 11U,
+            .contentHash = intactHash,
+            .frameCount = 0U,
+            .sampleRate = 48'000U,
+            .channelCount = 2U,
+            .path = "media/replaced.wav",
+            .name = "Replaced",
+        },
+        {
+            .stableId = 12U,
+            .contentHash = movedHash,
+            .frameCount = 0U,
+            .sampleRate = 48'000U,
+            .channelCount = 2U,
+            .path = "media/moved.wav",
+            .name = "Moved",
+        },
+        {
+            .stableId = 13U,
+            .contentHash = 0U,
+            .frameCount = 0U,
+            .sampleRate = 0U,
+            .channelCount = 0U,
+            .path = "media/unhashed.wav",
+            .name = "Unhashed",
+        },
+        {
+            .stableId = 14U,
+            .contentHash = 0xDEAD'BEEF'0000'0001ULL,
+            .frameCount = 0U,
+            .sampleRate = 48'000U,
+            .channelCount = 2U,
+            .path = "media/gone.wav",
+            .name = "Gone",
+        },
+    };
+    // A schema v3 migration placeholder: an identity with nothing to
+    // search for.
+    persistence::SessionMediaSource placeholder;
+    placeholder.stableId = 15U;
+    document.mediaSources.push_back(placeholder);
+
+    std::uint64_t clipId = 100U;
+    for (const auto& source : document.mediaSources) {
+        document.clips.push_back({
+            .stableId = clipId++,
+            .trackId = 1U,
+            .sourceId = source.stableId,
+            .startFrame = 0U,
+            .lengthFrames = 1'000U,
+            .sourceOffsetFrames = 0U,
+            .gain = 1.0F,
+            .muted = false,
+            .name = "Clip",
+        });
+    }
+
+    const persistence::MediaResolverConfig config {
+        .projectRoot = projectRoot,
+        .searchDirectories = {vaultRoot},
+        .maximumHashBytes = persistence::defaultMaximumHashBytes,
+        .maximumSearchEntries =
+            persistence::defaultMaximumSearchEntries,
+    };
+    const auto report =
+        persistence::resolveSessionMedia(document, config);
+
+    require(
+        report.resolutions.size() == 6U
+            && report.verifiedCount == 1U
+            && report.mismatchedCount == 1U
+            && report.relocatedCount == 1U
+            && report.unverifiableCount == 1U
+            && report.missingCount == 2U
+            && !report.complete(),
+        "media resolution classifies every source"
+    );
+    require(
+        statusOf(report, 10U)
+                == persistence::MediaResolutionStatus::verified
+            && statusOf(report, 11U)
+                == persistence::MediaResolutionStatus::mismatched
+            && statusOf(report, 12U)
+                == persistence::MediaResolutionStatus::relocated
+            && statusOf(report, 13U)
+                == persistence::MediaResolutionStatus::unverifiable
+            && statusOf(report, 14U)
+                == persistence::MediaResolutionStatus::missing
+            && statusOf(report, 15U)
+                == persistence::MediaResolutionStatus::missing,
+        "media resolution statuses are individually correct"
+    );
+
+    auto relinked = document;
+    const auto applied =
+        persistence::applyMediaResolution(relinked, report, config);
+    require(applied == 1U, "only relocations rewrite the document");
+    require(
+        relinked.mediaSources[0].path == "media/intact.wav"
+            && relinked.mediaSources[1].path == "media/replaced.wav"
+            && relinked.mediaSources[3].path == "media/unhashed.wav"
+            && relinked.mediaSources[4].path == "media/gone.wav"
+            && relinked.mediaSources[5].path.empty(),
+        "mismatched and missing sources are left untouched"
+    );
+    require(
+        relinked.mediaSources[2].path
+            != document.mediaSources[2].path,
+        "the relocated source adopts the located path"
+    );
+
+    std::string error;
+    require(
+        !persistence::serializeSessionDocument(relinked, error)
+             .empty(),
+        error.c_str()
+    );
+
+    // The relinked path must resolve on a later open from the same root.
+    const auto reresolved =
+        persistence::resolveSessionMedia(relinked, config);
+    require(
+        reresolved.verifiedCount == 2U
+            && reresolved.relocatedCount == 0U,
+        "a relinked source verifies directly on the next open"
+    );
+
+    // Two files sharing their first maximumHashBytes but differing in
+    // length must not hash alike, or a change past the bound would be
+    // read as the same take.
+    const auto boundedA = root / "bounded-a.wav";
+    const auto boundedB = root / "bounded-b.wav";
+    writeMediaFile(boundedA, "PREFIX--TAIL");
+    writeMediaFile(boundedB, "PREFIX--TAIL-EXTENDED");
+    std::uint64_t boundedBytesA = 0U;
+    std::uint64_t boundedBytesB = 0U;
+    const auto boundedHashA = persistence::hashMediaFile(
+        boundedA,
+        8U,
+        boundedBytesA,
+        hashError
+    );
+    require(hashError.empty(), hashError.c_str());
+    const auto boundedHashB = persistence::hashMediaFile(
+        boundedB,
+        8U,
+        boundedBytesB,
+        hashError
+    );
+    require(hashError.empty(), hashError.c_str());
+    require(
+        boundedBytesA == 8U && boundedBytesB == 8U
+            && boundedHashA != boundedHashB,
+        "content changes past the hash bound still separate"
+    );
+
+    // Replacing a verified file's content flips it to mismatched.
+    writeMediaFile(projectRoot / "media" / "intact.wav", "OTHER-AUDIO!");
+    const auto afterReplacement =
+        persistence::resolveSessionMedia(document, config);
+    require(
+        statusOf(afterReplacement, 10U)
+            == persistence::MediaResolutionStatus::mismatched,
+        "a replaced media file fails verification"
+    );
+
+    std::string missingError;
+    std::uint64_t missingBytes = 0U;
+    require(
+        persistence::hashMediaFile(
+            projectRoot / "media" / "absent.wav",
+            persistence::defaultMaximumHashBytes,
+            missingBytes,
+            missingError
+        ) == 0U
+            && !missingError.empty(),
+        "hashing an absent media file reports an error"
+    );
+
+    std::cout
+        << "Media resolution: sources=6, verified=1, mismatched=1, "
+           "relocated=1, unverifiable=1, missing=2, applied=1, "
+           "search_entries=" << report.searchEntriesScanned
+        << ", budget_exhausted="
+        << (report.searchBudgetExhausted ? 1 : 0)
+        << ", bounded_length_separations=1, replacements_detected=1, "
+           "unreadable_files_rejected=1\n";
 }
 
 void testAsyncProjectSaver(
@@ -2212,6 +2501,7 @@ int main(const int argc, char* argv[]) {
     testAtomicProjectStore(temporary.path());
     testProjectBackupRotation(temporary.path());
     testSessionDocumentRoundTrip(temporary.path());
+    testMediaResolution(temporary.path());
     testAsyncProjectSaver(temporary.path());
     testReferenceProjectBenchmark(temporary.path());
     testAsyncSessionSaver(temporary.path());

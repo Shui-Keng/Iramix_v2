@@ -16,11 +16,26 @@ Scoring: probability and impact range from 1 to 5. Priority is their product.
 | R-10 | Custom UI consumes capacity needed by audio engine | 4 | 4 | 16 | Limit widget set and measure delivery velocity at week 4 |
 | R-11 | Cross-platform behavior drifts | 4 | 4 | 16 | Three-OS CI plus screenshot and project round-trip tests |
 | R-12 | Plugin state blocks autosave or recovery | 3 | 4 | 12 | Snapshot asynchronously with size/time limits |
+| R-13 | No macOS or Linux hardware is available to the project | 5 | 4 | 20 | Hosted three-OS CI covers portability and sanitizers only; cold-cache and reference-hardware benchmarks on those platforms cannot be produced and must be escalated before Phase 1 |
 
 ## Critical escalation rule
 
 Any risk with priority 16 or above must have measured evidence or an accepted
 fallback before Phase 1 begins.
+
+## Reference-hardware coverage gap
+
+R-13 is a hardware constraint, not an open engineering task: the project has
+no macOS or Linux machine. Hosted CI proves the code builds, passes tests,
+and is clean under ASan/UBSan and TSan on all three operating systems, but
+shared runners cannot produce cold-cache open timings or any other
+reference-hardware performance figure — their storage and cache behavior is
+neither controlled nor representative.
+
+Every Phase 0 performance number recorded so far is therefore Windows-only.
+Phase 1 cannot close this by working harder; it needs either borrowed or
+rented hardware on both platforms, or an explicit decision to accept
+Windows-only performance evidence and defer the other two.
 
 ## ASIO administrative and trademark note
 
