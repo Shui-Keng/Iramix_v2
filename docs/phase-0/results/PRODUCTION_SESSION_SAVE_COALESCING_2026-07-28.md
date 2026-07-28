@@ -1,7 +1,7 @@
 # Production Session Ownership and Save Coalescing — 2026-07-28
 
-Status: Windows local screening passed; hosted three-OS CI pending for this
-source revision. P0-012 remains open.
+Status: Windows local screening and hosted three-OS CI/sanitizers passed.
+P0-012 remains open.
 
 ## Scope
 
@@ -111,6 +111,16 @@ requests continue. The two overlapping save futures are the regression test.
 - Five consecutive concurrent-save MSVC Release smoke runs passed after the
   virtual-thread pinning fix.
 
+Source commit:
+`6d6320a32fbecc96d33eb0c0e32dd78c9b83142b`
+
+GitHub Actions:
+[`30344362445`](https://github.com/Shui-Keng/Iramix_v2/actions/runs/30344362445)
+
+All six CTest targets and the Java concurrent edit/save smoke passed on
+Windows, macOS, and Ubuntu. ASan/UBSan and TSan also passed all six targets
+without diagnostics.
+
 ## Evidence boundary
 
 This proves native session ownership, optimistic revision checks, immutable
@@ -126,5 +136,5 @@ It does not yet prove:
 - MIDI, devices, plugins, media references, launcher state, or comping;
 - reference-storage and power-loss behavior.
 
-Hosted CI can validate portability and sanitizers but is not storage-hardware
+Hosted CI validates portability and sanitizers but is not storage-hardware
 or audio-hardware evidence.
