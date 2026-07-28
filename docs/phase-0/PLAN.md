@@ -145,6 +145,7 @@ Exit evidence:
 | P0-009 | User interviews | Not started |
 | P0-010 | Dependency/license inventory | Not started |
 | P0-011 | Immutable real-time graph core | Windows production path, 5,001-publication sanitizer edit-storm, cross-block ramps, sample-rate modulation, and denormal protection verified; other backends and final soak pending |
+| P0-012 | Disk and session resilience | Initial atomic snapshot, durable command journal, and forced-exit recording recovery verified on three-OS CI and sanitizers; read-ahead, large-file streaming, worker integration, migration, and reference benchmarks pending |
 
 ## Definition of done
 

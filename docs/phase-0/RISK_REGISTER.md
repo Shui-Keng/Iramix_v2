@@ -33,3 +33,12 @@ Use of the ASIO name or logo is optional. If either is used, Steinberg's
 trademark and usage rules apply. The initial product policy is to support the
 protocol without ASIO branding or logo, avoiding an additional trademark work
 stream during the early release stages.
+
+## Project-corruption evidence
+
+R-06 has initial mitigation evidence in
+[`results/PERSISTENCE_RECOVERY_2026-07-28.md`](results/PERSISTENCE_RECOVERY_2026-07-28.md):
+atomic snapshot failure injection, journal-tail repair, and forced-process-exit
+recording recovery pass on Windows, macOS, Linux, ASan/UBSan, and TSan. The
+risk remains open until large-file streaming, full session round trips,
+migration drills, and reference-project benchmarks pass.

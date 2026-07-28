@@ -150,3 +150,10 @@ Database work is forbidden on real-time threads.
 
 The project schema, command journal, and IPC schema are versioned independently.
 Every released schema has forward migration tests.
+
+The Phase 0 persistence foundation writes checksummed snapshots to a durable
+sibling staging file before atomic replacement. Persistent commands use a
+strictly sequenced, checksummed append-only journal whose durable append is the
+ACK boundary. Recording staging uses sequenced, checksummed audio blocks;
+recovery accepts only the longest valid prefix. Large-file streaming and
+worker-thread integration remain pending.

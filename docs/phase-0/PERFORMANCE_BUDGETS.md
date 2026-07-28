@@ -109,6 +109,14 @@ cross-platform target.
 - forced termination during recording must leave recoverable audio up to the
   last flushed block.
 
+The initial
+[`persistence/recovery foundation`](results/PERSISTENCE_RECOVERY_2026-07-28.md)
+preserved committed snapshots across injected replacement failures, repaired a
+partial command-journal tail, and recovered two durably flushed recording
+blocks after a child process exited at an injected crash point. Two durable
+journal appends took 6 ms in the local MSVC run. Large-file streaming,
+reference-project open time, and the UI-stall budget remain unmeasured.
+
 ## Plugin bridge
 
 - bridge overhead target: below 5% of one core for 100 pass-through instances at
