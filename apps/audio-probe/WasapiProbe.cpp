@@ -279,14 +279,35 @@ public:
 
     [[nodiscard]] bool enqueueGainAutomation(
         const std::int64_t samplePosition,
-        const float value
+        const int rampSamples
     ) noexcept {
-        return executor_.enqueueParameterEvent(
-            kGainId,
-            audio::GainNode::kGainParameter,
-            samplePosition,
-            value
-        );
+        if (!executor_.enqueueParameterRamp(
+                kGainId,
+                audio::GainNode::kGainParameter,
+                samplePosition,
+                1.0F,
+                rampSamples
+            )) {
+            return false;
+        }
+
+        constexpr std::array<float, 4> modulation {
+            0.0F,
+            0.125F,
+            -0.125F,
+            0.0F,
+        };
+        for (int index = 0; index < 4; ++index) {
+            if (!executor_.enqueueParameterModulation(
+                    kGainId,
+                    audio::GainNode::kGainParameter,
+                    samplePosition + rampSamples + index,
+                    modulation[static_cast<std::size_t>(index)]
+                )) {
+                return false;
+            }
+        }
+        return true;
     }
 
     [[nodiscard]] bool enqueueMixerReset(
@@ -847,7 +868,7 @@ ProbeResult runConfiguration(
                 automationQueued.store(
                     workload.enqueueGainAutomation(
                         static_cast<std::int64_t>(eventPosition),
-                        1.0F
+                        static_cast<int>(requestedFrames)
                     ),
                     std::memory_order_release
                 );
@@ -1081,6 +1102,10 @@ void printResult(const ProbeResult& result) {
             << " callback_allocations=" << result.audit.allocations
             << " callback_deallocations=" << result.audit.deallocations
             << " callback_blocking_locks=" << result.audit.blockingLocks
+            << " callback_denormal_mode_entries="
+            << result.audit.denormalModeEntries
+            << " callback_subnormal_samples_flushed="
+            << result.audit.subnormalSamplesFlushed
             << " graph_blocks=" << result.graphBlocks
             << " graph_generation=" << result.graphGeneration
             << " graph_observed_swaps=" << result.graphObservedSwaps

@@ -26,7 +26,9 @@ int main(const int argc, char* argv[]) {
             std::cerr << "Real-time audit hook self-test failed.\n";
             return 1;
         }
-        std::cout << "Real-time allocation/lock hooks verified.\n";
+        std::cout
+            << "Real-time allocation/lock and denormal hooks "
+               "verified.\n";
         return 0;
     }
 

@@ -511,6 +511,10 @@ bool runConfiguration(
             << " callback_allocations=" << audit.allocations
             << " callback_deallocations=" << audit.deallocations
             << " callback_blocking_locks=" << audit.blockingLocks
+            << " callback_denormal_mode_entries="
+            << audit.denormalModeEntries
+            << " callback_subnormal_samples_flushed="
+            << audit.subnormalSamplesFlushed
             << '\n' << std::flush;
         success = audit.allocations == 0U
             && audit.deallocations == 0U

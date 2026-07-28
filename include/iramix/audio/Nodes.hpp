@@ -46,6 +46,8 @@ private:
     std::atomic<float> gain_ {1.0F};
     std::atomic<float> pan_ {0.0F};
     std::atomic<std::uint32_t> muted_ {0U};
+    ParameterValueState gainState_ {1.0F};
+    ParameterValueState panState_ {0.0F};
     int channelCount_ {0};
 };
 
@@ -63,6 +65,7 @@ public:
 
 private:
     std::atomic<float> gain_ {1.0F};
+    ParameterValueState gainState_ {1.0F};
     int channelCount_ {0};
 };
 
@@ -81,6 +84,7 @@ public:
 
 private:
     std::atomic<float> outputGain_ {1.0F};
+    ParameterValueState outputGainState_ {1.0F};
     int channelCount_ {0};
 };
 

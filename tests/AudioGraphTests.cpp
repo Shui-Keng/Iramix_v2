@@ -9,6 +9,7 @@
 #include "iramix/realtime/Audit.hpp"
 
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -823,6 +824,237 @@ void testProductionNodeSignalChain() {
         << '\n';
 }
 
+void testParameterRampModulationAndDenormals() {
+    constexpr iramix::audio::NodeId inputId = 20U;
+    constexpr iramix::audio::NodeId gainId = 21U;
+    constexpr iramix::audio::NodeId outputId = 22U;
+
+    iramix::audio::GraphDescription graph;
+    for (const auto id : {inputId, gainId, outputId}) {
+        require(graph.addNode(id), "ramp graph node");
+    }
+    require(
+        graph.addConnection({inputId, 0, gainId, 0}),
+        "ramp input connection"
+    );
+    require(
+        graph.addConnection({gainId, 0, outputId, 0}),
+        "ramp output connection"
+    );
+
+    const iramix::audio::NodeInfoMap nodeInfo {
+        {inputId, {0, 1, 0}},
+        {gainId, {1, 1, 0}},
+        {outputId, {1, 0, 0}},
+    };
+    const auto plan =
+        iramix::audio::compileRenderPlan(graph, nodeInfo);
+    require(plan.valid, "ramp graph compiles");
+
+    const std::array<iramix::audio::AudioBusLayout, 1> monoBus {{
+        {1, iramix::audio::AudioBusRole::main, true},
+    }};
+    const std::span<const iramix::audio::AudioBusLayout> noBuses;
+    const auto prepareInfo = [](
+        const std::span<const iramix::audio::AudioBusLayout> inputs,
+        const std::span<const iramix::audio::AudioBusLayout> outputs
+    ) {
+        return iramix::audio::NodePrepareInfo {
+            .sampleRate = 48'000.0,
+            .maxBlockSize = 4,
+            .inputBuses = inputs,
+            .outputBuses = outputs,
+            .maxMidiEvents = 4,
+            .maxMidiBytes = 16,
+        };
+    };
+
+    auto input = std::make_shared<iramix::audio::DeviceInputNode>();
+    auto gain = std::make_shared<iramix::audio::GainNode>(0.0F);
+    auto output = std::make_shared<iramix::audio::OutputNode>();
+    input->prepare(prepareInfo(noBuses, monoBus));
+    gain->prepare(prepareInfo(monoBus, monoBus));
+    output->prepare(prepareInfo(monoBus, noBuses));
+
+    iramix::audio::RenderPlanExecutor executor;
+    std::string error;
+    require(
+        executor.prepareAndPublish(
+            plan,
+            {
+                .maximumBlockSize = 4,
+                .maximumMidiEventsPerNode = 4,
+                .maximumMidiBytesPerNode = 16,
+                .maximumParameterEventsPerNode = 8,
+                .outputNode = outputId,
+                .outputChannelCount = 1,
+            },
+            [&](const iramix::audio::NodeId id)
+                -> std::shared_ptr<iramix::audio::IAudioNode> {
+                switch (id) {
+                case inputId:
+                    return input;
+                case gainId:
+                    return gain;
+                case outputId:
+                    return output;
+                default:
+                    return {};
+                }
+            },
+            error
+        ),
+        error.c_str()
+    );
+
+    require(
+        !executor.enqueueParameterRamp(
+            gainId,
+            iramix::audio::GainNode::kGainParameter,
+            100,
+            1.0F,
+            0
+        ),
+        "zero-duration ramp is rejected"
+    );
+    require(
+        executor.enqueueParameterRamp(
+            gainId,
+            iramix::audio::GainNode::kGainParameter,
+            100,
+            1.0F,
+            6
+        ),
+        "cross-block ramp enqueues"
+    );
+    const std::array<float, 4> modulation {
+        0.0F,
+        0.0F,
+        0.5F,
+        -0.25F,
+    };
+    for (int index = 0; index < 4; ++index) {
+        require(
+            executor.enqueueParameterModulation(
+                gainId,
+                iramix::audio::GainNode::kGainParameter,
+                104 + index,
+                modulation[static_cast<std::size_t>(index)]
+            ),
+            "per-sample modulation event enqueues"
+        );
+    }
+
+    std::array<float, 4> ones {1.0F, 1.0F, 1.0F, 1.0F};
+    std::array<const float*, 1> inputPointers {ones.data()};
+    std::array<float, 4> firstBlock {};
+    std::array<float, 4> secondBlock {};
+    std::array<float*, 1> firstOutput {firstBlock.data()};
+    std::array<float*, 1> secondOutput {secondBlock.data()};
+    input->bindInput({inputPointers.data(), 1, 4});
+
+    iramix::realtime::resetAuditCounters();
+    executor.renderTo(
+        {firstOutput.data(), 1, 4},
+        {.samplePosition = 100, .playing = true}
+    );
+    executor.renderTo(
+        {secondOutput.data(), 1, 4},
+        {.samplePosition = 104, .playing = true}
+    );
+
+    constexpr float tolerance = 0.00001F;
+    const std::array<float, 4> expectedFirst {
+        1.0F / 6.0F,
+        2.0F / 6.0F,
+        3.0F / 6.0F,
+        4.0F / 6.0F,
+    };
+    const std::array<float, 4> expectedSecond {
+        5.0F / 6.0F,
+        1.0F,
+        1.5F,
+        0.75F,
+    };
+    for (std::size_t index = 0U; index < 4U; ++index) {
+        require(
+            std::abs(firstBlock[index] - expectedFirst[index])
+                < tolerance,
+            "ramp first block value"
+        );
+        require(
+            std::abs(secondBlock[index] - expectedSecond[index])
+                < tolerance,
+            "ramp and modulation second block value"
+        );
+    }
+    require(
+        executor.pendingParameterEventCount() == 0U,
+        "ramp and modulation queue drains"
+    );
+    require(
+        executor.rejectedParameterEventCount() == 1U,
+        "invalid ramp diagnostic"
+    );
+
+    float positiveFlushed = 1.0F;
+    float negativeFlushed = 1.0F;
+    {
+        iramix::realtime::CallbackScope callback;
+        require(
+            !iramix::realtime::denormalProtectionSupported()
+                || iramix::realtime::denormalProtectionActive(),
+            "callback denormal protection is active"
+        );
+        positiveFlushed =
+            iramix::realtime::flushSubnormalSample(
+                std::bit_cast<float>(0x0000'0001U)
+            );
+        negativeFlushed =
+            iramix::realtime::flushSubnormalSample(
+                std::bit_cast<float>(0x8000'0001U)
+            );
+    }
+    const auto audit = iramix::realtime::auditSnapshot();
+    require(audit.allocations == 0U, "ramp callback allocations");
+    require(audit.deallocations == 0U, "ramp callback deallocations");
+    require(audit.blockingLocks == 0U, "ramp callback locks");
+    require(
+        audit.denormalModeEntries
+            == (
+                iramix::realtime::denormalProtectionSupported()
+                ? 3U
+                : 0U
+            ),
+        "outer callbacks enter denormal-safe mode"
+    );
+    require(
+        audit.subnormalSamplesFlushed == 2U,
+        "subnormal flush instrumentation"
+    );
+    require(
+        std::bit_cast<std::uint32_t>(positiveFlushed) == 0U,
+        "positive subnormal flushes to positive zero"
+    );
+    require(
+        std::bit_cast<std::uint32_t>(negativeFlushed)
+            == 0x8000'0000U,
+        "negative subnormal flushes to negative zero"
+    );
+    input->unbindInput();
+
+    std::cout
+        << "Parameter ramp/modulation: ramp_samples=6, blocks=2, "
+        << "modulation_events=4, denormal_mode_entries="
+        << audit.denormalModeEntries
+        << ", subnormal_samples_flushed="
+        << audit.subnormalSamplesFlushed
+        << ", allocations=" << audit.allocations
+        << ", deallocations=" << audit.deallocations
+        << ", blocking_locks=" << audit.blockingLocks
+        << '\n';
+}
+
 } // namespace
 
 int main() {
@@ -833,6 +1065,7 @@ int main() {
     testCompilerValidation();
     testRenderPlanPdcMidiAndRealtimeAudit();
     testProductionNodeSignalChain();
+    testParameterRampModulationAndDenormals();
     std::cout << "All Iramix audio graph tests passed.\n";
     return EXIT_SUCCESS;
 }

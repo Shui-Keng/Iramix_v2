@@ -13,11 +13,19 @@ namespace iramix::audio {
 
 using ParameterId = std::uint32_t;
 
+enum class ParameterEventType : std::uint8_t {
+    value,
+    linearRamp,
+    modulation,
+};
+
 struct ScheduledParameterEvent final {
     NodeId targetNode {0U};
     ParameterId parameter {0U};
     std::int64_t samplePosition {0};
     float value {0.0F};
+    ParameterEventType type {ParameterEventType::value};
+    int durationSamples {0};
     std::uint64_t sequence {0U};
 };
 
@@ -25,7 +33,35 @@ struct NodeParameterEvent final {
     ParameterId parameter {0U};
     int sampleOffset {0};
     float value {0.0F};
+    ParameterEventType type {ParameterEventType::value};
+    int durationSamples {0};
     std::uint64_t sequence {0U};
+};
+
+// Audio-thread-only scalar state. Ramps advance once per rendered sample and
+// additive modulation remains active until the next modulation event.
+class ParameterValueState final {
+public:
+    explicit ParameterValueState(float initialValue = 0.0F) noexcept;
+
+    void beginBlock(float fallbackValue) noexcept;
+    void apply(const NodeParameterEvent& event) noexcept;
+
+    [[nodiscard]] float nextValue() noexcept;
+    [[nodiscard]] float baseValue() const noexcept {
+        return currentValue_;
+    }
+
+    [[nodiscard]] bool ramping() const noexcept {
+        return remainingRampSamples_ > 0;
+    }
+
+private:
+    float currentValue_ {0.0F};
+    float targetValue_ {0.0F};
+    float rampIncrement_ {0.0F};
+    float modulation_ {0.0F};
+    int remainingRampSamples_ {0};
 };
 
 // Fixed-capacity per-node block storage. reserve() is control-thread only.

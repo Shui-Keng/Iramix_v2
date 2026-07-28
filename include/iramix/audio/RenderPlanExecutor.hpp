@@ -102,6 +102,21 @@ public:
         float value
     ) noexcept;
 
+    [[nodiscard]] bool enqueueParameterRamp(
+        NodeId targetNode,
+        ParameterId parameter,
+        std::int64_t samplePosition,
+        float targetValue,
+        int durationSamples
+    ) noexcept;
+
+    [[nodiscard]] bool enqueueParameterModulation(
+        NodeId targetNode,
+        ParameterId parameter,
+        std::int64_t samplePosition,
+        float additiveValue
+    ) noexcept;
+
     void clearParameterEvents() noexcept;
 
     // Single control-thread producer. A false return is an explicit rejection;
@@ -231,6 +246,15 @@ public:
     [[nodiscard]] std::uint64_t droppedMidiEventCount() const noexcept;
 
 private:
+    [[nodiscard]] bool enqueueParameterChange(
+        NodeId targetNode,
+        ParameterId parameter,
+        std::int64_t samplePosition,
+        float value,
+        ParameterEventType type,
+        int durationSamples
+    ) noexcept;
+
     void execute(
         PreparedRenderPlan& plan,
         int frameCount,

@@ -318,10 +318,67 @@ bool RenderPlanExecutor::enqueueParameterEvent(
     const std::int64_t samplePosition,
     const float value
 ) noexcept {
+    return enqueueParameterChange(
+        targetNode,
+        parameter,
+        samplePosition,
+        value,
+        ParameterEventType::value,
+        0
+    );
+}
+
+bool RenderPlanExecutor::enqueueParameterRamp(
+    const NodeId targetNode,
+    const ParameterId parameter,
+    const std::int64_t samplePosition,
+    const float targetValue,
+    const int durationSamples
+) noexcept {
+    return enqueueParameterChange(
+        targetNode,
+        parameter,
+        samplePosition,
+        targetValue,
+        ParameterEventType::linearRamp,
+        durationSamples
+    );
+}
+
+bool RenderPlanExecutor::enqueueParameterModulation(
+    const NodeId targetNode,
+    const ParameterId parameter,
+    const std::int64_t samplePosition,
+    const float additiveValue
+) noexcept {
+    return enqueueParameterChange(
+        targetNode,
+        parameter,
+        samplePosition,
+        additiveValue,
+        ParameterEventType::modulation,
+        0
+    );
+}
+
+bool RenderPlanExecutor::enqueueParameterChange(
+    const NodeId targetNode,
+    const ParameterId parameter,
+    const std::int64_t samplePosition,
+    const float value,
+    const ParameterEventType type,
+    const int durationSamples
+) noexcept {
+    const bool validDuration =
+        (type == ParameterEventType::linearRamp
+            && durationSamples > 0)
+        || (type != ParameterEventType::linearRamp
+            && durationSamples == 0);
     if (targetNode == 0U
         || parameter == 0U
         || samplePosition < 0
         || !std::isfinite(value)
+        || !validDuration
         || samplePosition < lastEnqueuedParameterSample_) {
         invalidParameterEvents_.fetch_add(
             1U,
@@ -335,6 +392,8 @@ bool RenderPlanExecutor::enqueueParameterEvent(
         .parameter = parameter,
         .samplePosition = samplePosition,
         .value = value,
+        .type = type,
+        .durationSamples = durationSamples,
         .sequence = nextParameterSequence_++,
     };
     if (!parameterEvents_.tryPush(event)) {
@@ -634,6 +693,8 @@ std::uint32_t RenderPlanExecutor::routeParameterEvents(
                 .parameter = scheduled.parameter,
                 .sampleOffset = offset,
                 .value = scheduled.value,
+                .type = scheduled.type,
+                .durationSamples = scheduled.durationSamples,
                 .sequence = scheduled.sequence,
             })) {
             parameterBufferOverflows_.fetch_add(

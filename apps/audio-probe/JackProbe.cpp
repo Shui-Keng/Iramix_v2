@@ -495,6 +495,10 @@ void printResult(const Result& result) {
         << " callback_allocations=" << result.audit.allocations
         << " callback_deallocations=" << result.audit.deallocations
         << " callback_blocking_locks=" << result.audit.blockingLocks
+        << " callback_denormal_mode_entries="
+        << result.audit.denormalModeEntries
+        << " callback_subnormal_samples_flushed="
+        << result.audit.subnormalSamplesFlushed
         << '\n' << std::flush;
 }
 

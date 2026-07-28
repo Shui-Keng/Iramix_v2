@@ -105,8 +105,8 @@ void TrackNode::prepare(const NodePrepareInfo& info) {
 void TrackNode::process(
     const NodeProcessContext& context
 ) noexcept {
-    float currentGain = gain();
-    float currentPan = pan();
+    gainState_.beginBlock(gain());
+    panState_.beginBlock(pan());
     bool currentMute = muted();
     int eventIndex = 0;
     const int eventCount = context.parameters != nullptr
@@ -127,16 +127,31 @@ void TrackNode::process(
                 break;
             }
             if (event.parameter == kGainParameter) {
-                currentGain = event.value;
-                gain_.store(currentGain, std::memory_order_relaxed);
+                gainState_.apply(event);
+                if (event.type != ParameterEventType::modulation) {
+                    gain_.store(
+                        event.value,
+                        std::memory_order_relaxed
+                    );
+                }
             } else if (event.parameter == kPanParameter) {
-                currentPan = std::clamp(
-                    event.value,
-                    -1.0F,
-                    1.0F
-                );
-                pan_.store(currentPan, std::memory_order_relaxed);
-            } else if (event.parameter == kMuteParameter) {
+                auto panEvent = event;
+                if (event.type != ParameterEventType::modulation) {
+                    panEvent.value = std::clamp(
+                        event.value,
+                        -1.0F,
+                        1.0F
+                    );
+                    pan_.store(
+                        panEvent.value,
+                        std::memory_order_relaxed
+                    );
+                }
+                panState_.apply(panEvent);
+            } else if (
+                event.parameter == kMuteParameter
+                && event.type == ParameterEventType::value
+            ) {
                 currentMute = event.value >= 0.5F;
                 muted_.store(
                     currentMute ? 1U : 0U,
@@ -146,6 +161,12 @@ void TrackNode::process(
             ++eventIndex;
         }
 
+        const float currentGain = gainState_.nextValue();
+        const float currentPan = std::clamp(
+            panState_.nextValue(),
+            -1.0F,
+            1.0F
+        );
         if (currentMute) {
             for (int channel = 0; channel < channels; ++channel) {
                 context.audio.channel(channel)[frame] = 0.0F;
@@ -203,7 +224,7 @@ void GainNode::prepare(const NodePrepareInfo& info) {
 void GainNode::process(
     const NodeProcessContext& context
 ) noexcept {
-    float currentGain = gain();
+    gainState_.beginBlock(gain());
     int eventIndex = 0;
     const int eventCount = context.parameters != nullptr
         ? context.parameters->eventCount()
@@ -222,11 +243,17 @@ void GainNode::process(
                 break;
             }
             if (event.parameter == kGainParameter) {
-                currentGain = event.value;
-                gain_.store(currentGain, std::memory_order_relaxed);
+                gainState_.apply(event);
+                if (event.type != ParameterEventType::modulation) {
+                    gain_.store(
+                        event.value,
+                        std::memory_order_relaxed
+                    );
+                }
             }
             ++eventIndex;
         }
+        const float currentGain = gainState_.nextValue();
         for (int channel = 0; channel < channels; ++channel) {
             context.audio.channel(channel)[frame] *= currentGain;
         }
@@ -248,7 +275,7 @@ void MixerNode::prepare(const NodePrepareInfo& info) {
 void MixerNode::process(
     const NodeProcessContext& context
 ) noexcept {
-    float currentGain = outputGain();
+    outputGainState_.beginBlock(outputGain());
     int eventIndex = 0;
     const int eventCount = context.parameters != nullptr
         ? context.parameters->eventCount()
@@ -267,14 +294,17 @@ void MixerNode::process(
                 break;
             }
             if (event.parameter == kOutputGainParameter) {
-                currentGain = event.value;
-                outputGain_.store(
-                    currentGain,
-                    std::memory_order_relaxed
-                );
+                outputGainState_.apply(event);
+                if (event.type != ParameterEventType::modulation) {
+                    outputGain_.store(
+                        event.value,
+                        std::memory_order_relaxed
+                    );
+                }
             }
             ++eventIndex;
         }
+        const float currentGain = outputGainState_.nextValue();
         for (int channel = 0; channel < channels; ++channel) {
             context.audio.channel(channel)[frame] *= currentGain;
         }
