@@ -29,6 +29,15 @@ single crash capable of destroying otherwise valid work.
   when no block is ready.
 - Filesystem calls, CRC work, durable flushes, and queue allocation remain on
   control or disk-worker threads.
+- Project saves use a bounded single-producer pipeline. Each slot owns its
+  immutable payload reference from submission through durable completion, so
+  an ACK/REJECT cannot be dropped independently from its request.
+- A committed completion is published only after the staging flush and atomic
+  replacement return successfully. Pipeline saturation and invalid revisions
+  are rejected synchronously.
+- Session documents use stable non-zero entity IDs and a schema version
+  independent from the project envelope. The current Phase 0 schema is v2;
+  v1 migration supplies deterministic defaults for fields introduced in v2.
 - Project, journal, recording, and IPC schema versions remain independent.
 - No persistence operation may run on an audio callback.
 
@@ -47,6 +56,10 @@ File durability uses `_commit` on Windows and `fsync` on POSIX.
 - Recording and read-ahead queue saturation remains bounded and observable.
 - Allocation-tracking hooks report zero callback allocation/deallocation and
   zero tracked blocking locks for enqueue, dequeue, and underflow paths.
+- Async-save completion order matches accepted revision order, injected
+  replacement failures return explicit rejection, and the committed project
+  preserves the last successful revision.
+- Current-schema round trips and every retained legacy fixture migrate forward.
 - Large-file streaming, reference-project open time, and UI-stall budgets pass
   independently.
 
@@ -60,6 +73,11 @@ legacy `recoverRecording` helper still materializes samples for tests and
 small imports, while production streaming uses `scanRecording` and
 `RecoverableRecordingReader`.
 
-Snapshot save remains synchronous. Final media conversion, session integration,
-full-scale large-recording timing, migrations, and large-project open/UI-stall
-measurements remain pending, so this ADR remains proposed.
+The project save call now runs behind a bounded worker pipeline, and the first
+stable-ID session DTO plus v1-to-v2 migration fixture is implemented. Session
+serialization is still prepared before submission; submit-latency evidence
+therefore does not include serialization cost.
+
+Final media conversion, complete DAW session coverage, live engine integration,
+full-scale large-recording timing, and reference-project open measurements
+remain pending, so this ADR remains proposed.

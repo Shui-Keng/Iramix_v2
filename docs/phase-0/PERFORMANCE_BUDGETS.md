@@ -127,6 +127,17 @@ with a fixed 65,536-byte scanner scratch buffer and no sample materialization.
 This is deterministic worker/format evidence, not device-stream dropout or
 full reference-recording performance evidence.
 
+The
+[`async save and session migration screening`](results/ASYNC_SAVE_SESSION_MIGRATION_2026-07-28.md)
+submitted 200 sequential immutable session revisions through an eight-slot
+pipeline under active durable-save load. The local MSVC run measured submit
+p50 `0.0005 ms`, p95 `0.0051 ms`, p99 `0.0061 ms`, and maximum `0.0147 ms`.
+Every accepted revision received a committed completion, the final project
+opened at revision 200, and an injected failure produced an explicit rejection.
+This meets the submit-call portion of the below-16-ms UI-stall budget. It does
+not include session serialization, IPC, or durable completion latency, so the
+complete normal-save UI budget remains open.
+
 ## Plugin bridge
 
 - bridge overhead target: below 5% of one core for 100 pass-through instances at

@@ -102,7 +102,9 @@ separate bounded queue; it may drop under saturation, with every drop counted.
 - Build waveform and spectral caches.
 - Scan and host plugins.
 - Index browser content.
-- Persist project commands and backups.
+- Persist project commands, immutable snapshots, and backups.
+- Publish durable project-save ACK/REJECT records through a bounded pipeline;
+  pipeline saturation is an explicit control-thread outcome.
 
 ## Platform boundaries
 
@@ -165,6 +167,16 @@ SPSC queues whose callback-facing operations perform copies plus lock-free
 atomic publication only. Filesystem and durable-flush work runs on disk worker
 threads.
 
-The first worker slice is not yet connected to live session routing or device
-capture. Asynchronous project snapshots, final media conversion, migrations,
-and reference-project timing remain pending.
+Project snapshots can be submitted as immutable byte payloads to a bounded save
+worker. A pipeline slot is retained until the control thread consumes its
+completion. The worker publishes `committed` only after durable staging and
+atomic replacement succeed.
+
+The Phase 0 session DTO uses stable IDs and an independently versioned binary
+schema. Schema v2 stores revision, sample rate, tempo, track type, gain, color,
+and name; the v1 migration deterministically supplies the fields added in v2.
+Runtime audio nodes are not serialized.
+
+Disk and save workers are not yet connected to the full live session/device
+flow. Serialization still occurs before save submission. Complete DAW session
+coverage, final media conversion, and reference-project timing remain pending.

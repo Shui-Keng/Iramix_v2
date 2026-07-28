@@ -43,4 +43,7 @@ recording recovery pass on Windows, macOS, Linux, ASan/UBSan, and TSan. The
 risk is further reduced by fixed-memory recording scans, invalid-tail
 truncation, and bounded recording/read-ahead queues with explicit pressure
 behavior. It remains open until full-scale recording runs, full session round
-trips, migration drills, and reference-project benchmarks pass.
+trips, migration drills, and reference-project benchmarks pass. The first
+stable-ID session round trip, v1-to-v2 migration fixture, bounded async-save
+pipeline, and failure-to-rejection ordering are now covered by
+[`ASYNC_SAVE_SESSION_MIGRATION_2026-07-28.md`](results/ASYNC_SAVE_SESSION_MIGRATION_2026-07-28.md).

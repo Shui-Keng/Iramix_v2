@@ -95,6 +95,8 @@ The combined evidence still does not prove the full Week 6 exit gate:
 - worker queues are not yet connected to live session/device routing;
 - migration and full session-model round-trip tests remain pending.
 
-Next work is worker-thread project save plus session-model round-trip and
-migration infrastructure, followed by live disk-worker integration and
-reference-project benchmarks.
+The worker-thread project save, first session round trip, and v1-to-v2
+migration fixture are recorded in
+[`ASYNC_SAVE_SESSION_MIGRATION_2026-07-28.md`](ASYNC_SAVE_SESSION_MIGRATION_2026-07-28.md).
+Next work is complete session coverage, live worker integration, serialization
+timing, and reference-project benchmarks.
