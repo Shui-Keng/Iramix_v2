@@ -5,7 +5,7 @@ Scoring: probability and impact range from 1 to 5. Priority is their product.
 | ID | Risk | P | I | Priority | Phase 0 response |
 |---|---|---:|---:|---:|---|
 | R-01 | Scope exceeds available team capacity | 5 | 5 | 25 | Enforce the v1 scope contract and validate team size |
-| R-02 | Plugin crash or hang destabilizes audio | 4 | 5 | 20 | Prototype process isolation and bounded deadlines |
+| R-02 | Plugin crash or hang destabilizes audio | 4 | 5 | 20 | Bounded-deadline shared-memory bridge measured: host survives child crash and hang, degrading to counted silence. See `results/PLUGIN_PROCESS_ISOLATION_2026-07-28.md`. Evidence is against a stand-in child, not a real plugin |
 | R-03 | Skiko/Skia GPU behavior differs substantially by OS | 4 | 4 | 16 | Run one renderer and device-loss spike per OS |
 | R-04 | Linux plugin editors fail under Wayland | 4 | 4 | 16 | Test XWayland, native Wayland, and generic editor fallback |
 | R-05 | Multicore graph scheduling misses deadlines | 3 | 5 | 15 | Stabilize single coordinator first; benchmark graph partitions |
