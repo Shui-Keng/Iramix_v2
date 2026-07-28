@@ -1,7 +1,7 @@
 # Device Configuration Restoration — 2026-07-28
 
-Status: P0-012 device restoration verified locally; hosted three-OS CI and
-sanitizer confirmation pending. Week 6 remains open.
+Status: P0-012 device restoration verified locally and on hosted three-OS
+CI plus sanitizers; Week 6 remains open.
 
 ## Scope
 
@@ -74,6 +74,19 @@ Full local suite passes:
 100% tests passed out of 6
 ```
 
+## CI and sanitizer results
+
+GitHub Actions:
+[`30356879372`](https://github.com/Shui-Keng/Iramix_v2/actions/runs/30356879372)
+
+All five jobs passed: Windows/macOS/Ubuntu build, `ctest`, and
+`gradle check`, plus ASan/UBSan and TSan with no diagnostics.
+
+The macOS session suite ran in 0.70 s, consistent with the 0.79 s of the
+previous run against the 500 ms autosave window. The pacing correction in
+[`AUTOSAVE_CHECKPOINT_COMPACTION`](AUTOSAVE_CHECKPOINT_COMPACTION_2026-07-28.md)
+is therefore stable across runs rather than a single lucky pass.
+
 ## Evidence boundary
 
 This proves the restoration decision rules, their fail-closed behavior on
@@ -82,7 +95,6 @@ resolved configuration is round-trippable.
 
 It does not prove:
 
-- hosted three-OS CI or sanitizer results for the resolver (not yet run);
 - **that any audio device actually opens.** No backend consumes a resolved
   configuration yet. The WASAPI, Core Audio, and JACK probes still
   configure themselves independently, so this layer decides what *should*
