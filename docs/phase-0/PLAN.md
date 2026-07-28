@@ -115,12 +115,20 @@ Exit evidence:
 - Prototype shared-memory audio/control transport.
 - Terminate the plugin process during playback.
 - Identify native editor embedding constraints on each OS.
+- Restore persisted plugin state into a hosted plugin instance.
 
 Exit evidence:
 
 - main process survives plugin termination;
 - measured bridge overhead;
-- plugin UI risk report.
+- plugin UI risk report;
+- a session's stored plugin state blob reloaded into a live plugin.
+
+Plugin state restoration moved here from P0-012. The schema v4 record
+(format, restorable identifier, slot, bypass, opaque bounded state blob)
+is stored and round-trips intact, but consuming it means starting a plugin
+host, which is exactly this task's boundary. Implementing it under P0-012
+would only have produced another layer that nothing consumes.
 
 ## Week 8: Review and Phase 1 commitment
 
@@ -145,8 +153,8 @@ Exit evidence:
 | P0-009 | User interviews | Not started |
 | P0-010 | Dependency/license inventory | Not started |
 | P0-011 | Immutable real-time graph core | Windows production path, 5,001-publication sanitizer edit-storm, cross-block ramps, sample-rate modulation, and denormal protection verified; other backends and final soak pending |
-| P0-012 | Disk and session resilience | Native session ownership, write-ahead journal, monotonic undo/redo, replay, immutable/coalesced saves, fixed-window autosave, shutdown flush, revision-gated history compaction, revisioned backup rotation/retention, fail-closed automatic restore, and durable journal baselines verified locally and on three-OS CI/Java/sanitizers; and schema v4 media references, MIDI, device configuration, and plugin state verified locally and on three-OS CI/Java/sanitizers; media relink/restoration verified locally and on three-OS CI/sanitizers; device-configuration restoration decided and verified locally and on three-OS CI/sanitizers but not yet consumed by a backend; plugin restoration pending; macOS/Linux reference-hardware benchmarks accepted as out of scope for Phase 0 (R-13) |
-| P0-013 | Plugin process isolation | Not started |
+| P0-012 | Disk and session resilience | Native session ownership, write-ahead journal, monotonic undo/redo, replay, immutable/coalesced saves, fixed-window autosave, shutdown flush, revision-gated history compaction, revisioned backup rotation/retention, fail-closed automatic restore, and durable journal baselines verified locally and on three-OS CI/Java/sanitizers; and schema v4 media references, MIDI, device configuration, and plugin state verified locally and on three-OS CI/Java/sanitizers; media relink/restoration verified locally and on three-OS CI/sanitizers; device-configuration restoration decided and verified locally and on three-OS CI/sanitizers but not yet consumed by a backend; plugin state restoration moved to P0-013; macOS/Linux reference-hardware benchmarks accepted as out of scope for Phase 0 (R-13) |
+| P0-013 | Plugin process isolation | Not started; also owns plugin state restoration, moved from P0-012 because consuming a stored state blob requires a running plugin host |
 | P0-014 | Phase 0 exit review and Phase 1 backlog | Not started |
 
 ## Definition of done

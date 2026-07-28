@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <new>
+#include <optional>
 #include <system_error>
 #include <utility>
 
@@ -10,10 +11,12 @@ namespace iramix::persistence {
 
 SessionPersistenceService::SessionPersistenceService(
     std::unique_ptr<SessionSaveCoordinator> coordinator,
-    const std::chrono::milliseconds autosaveInterval
+    const std::chrono::milliseconds autosaveInterval,
+    std::shared_ptr<AutosaveClock> clock
 )
     : coordinator_ {std::move(coordinator)},
-      autosaveInterval_ {autosaveInterval} {}
+      autosaveInterval_ {autosaveInterval},
+      clock_ {std::move(clock)} {}
 
 SessionPersistenceService::~SessionPersistenceService() {
     stop();
@@ -24,7 +27,8 @@ SessionPersistenceService::create(
     std::filesystem::path target,
     const std::chrono::milliseconds autosaveInterval,
     std::string& error,
-    const std::uint64_t initialDurableRevision
+    const std::uint64_t initialDurableRevision,
+    std::shared_ptr<AutosaveClock> clock
 ) {
     error.clear();
     if (autosaveInterval <= std::chrono::milliseconds::zero()) {
@@ -40,10 +44,14 @@ SessionPersistenceService::create(
         return {};
     }
     try {
+        if (clock == nullptr) {
+            clock = makeSteadyAutosaveClock();
+        }
         return std::unique_ptr<SessionPersistenceService> {
             new SessionPersistenceService {
                 std::move(coordinator),
                 autosaveInterval,
+                std::move(clock),
             }
         };
     } catch (const std::bad_alloc&) {
@@ -66,6 +74,11 @@ bool SessionPersistenceService::start(std::string& error) {
         return false;
     }
     try {
+        // A clock that cannot advance on its own must be able to wake the
+        // worker, or a virtual deadline would never be observed.
+        clock_->setObserver([this] {
+            wake_.notify_one();
+        });
         worker_ = std::thread {
             [this] {
                 run();
@@ -99,6 +112,9 @@ void SessionPersistenceService::stop() noexcept {
     if (worker_.joinable()) {
         worker_.join();
     }
+    // The observer captures this, and the clock may outlive the service
+    // when a caller holds its own handle. Drop it once the worker is gone.
+    clock_->setObserver(nullptr);
 }
 
 AutosaveDirtyStatus SessionPersistenceService::markDirty(
@@ -127,8 +143,7 @@ AutosaveDirtyStatus SessionPersistenceService::markDirty(
         ++dirtyReplacementCount_;
     }
     if (!deadlineArmed_) {
-        autosaveDeadline_ =
-            std::chrono::steady_clock::now() + autosaveInterval_;
+        autosaveDeadline_ = clock_->now() + autosaveInterval_;
         deadlineArmed_ = true;
     }
     wake_.notify_one();
@@ -151,9 +166,7 @@ SessionSaveRequestStatus SessionPersistenceService::requestSave(
         || result == SessionSaveRequestStatus::coalesced
         || result == SessionSaveRequestStatus::alreadyRequested) {
         if (dirtySnapshot_ != nullptr) {
-            autosaveDeadline_ =
-                std::chrono::steady_clock::now()
-                + autosaveInterval_;
+            autosaveDeadline_ = clock_->now() + autosaveInterval_;
             deadlineArmed_ = true;
         }
         wake_.notify_one();
@@ -201,7 +214,7 @@ void SessionPersistenceService::run() noexcept {
     while (!stopRequested_) {
         coordinator_->pump();
         reconcileDurableState();
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = clock_->now();
         if (dirtySnapshot_ != nullptr
             && deadlineArmed_
             && now >= autosaveDeadline_) {
@@ -217,22 +230,26 @@ void SessionPersistenceService::run() noexcept {
             }
         }
 
-        auto nextWake = std::chrono::steady_clock::time_point::max();
+        // Deadline waiting is in the clock's domain; coordinator polling
+        // is not. The save worker performs real disk I/O on another
+        // thread, so its completion is still awaited in real time even
+        // when virtual time is driving the autosave window.
+        std::optional<std::chrono::steady_clock::time_point> nextWake;
         if (deadlineArmed_) {
-            nextWake = autosaveDeadline_;
+            nextWake = clock_->wakeTimeFor(autosaveDeadline_);
         }
         if (coordinator_->inFlightRevision() != 0U
             || coordinator_->pendingRevision() != 0U) {
-            nextWake = std::min(
-                nextWake,
-                now + std::chrono::milliseconds {1}
-            );
+            const auto poll = std::chrono::steady_clock::now()
+                + std::chrono::milliseconds {1};
+            nextWake = nextWake.has_value()
+                ? std::min(*nextWake, poll)
+                : poll;
         }
-        if (nextWake
-            == std::chrono::steady_clock::time_point::max()) {
-            wake_.wait(lock);
+        if (nextWake.has_value()) {
+            wake_.wait_until(lock, *nextWake);
         } else {
-            wake_.wait_until(lock, nextWake);
+            wake_.wait(lock);
         }
     }
 

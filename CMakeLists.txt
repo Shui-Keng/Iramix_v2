@@ -42,6 +42,7 @@ add_library(iramix_core STATIC
     src/platform/Platform.cpp
     src/persistence/AsyncProjectSaver.cpp
     src/persistence/AsyncSessionSaver.cpp
+    src/persistence/AutosaveClock.cpp
     src/persistence/DeviceResolver.cpp
     src/persistence/DiskAudioWorkers.cpp
     src/persistence/MediaResolver.cpp

@@ -119,7 +119,11 @@ Layered, each stage owning one guarantee:
   `AsyncSessionSaver` — fixed autosave window anchored to the first dirty
   revision, coalescing toward the newest revision, shutdown flush.
   Validation and serialization happen on the save worker, never on the
-  Java UI or command-dispatch thread.
+  Java UI or command-dispatch thread. The autosave deadline runs on an
+  injected `AutosaveClock`: production uses `SteadyAutosaveClock`, tests
+  use `ManualAutosaveClock` and step virtual time. Do not reintroduce
+  `sleep_for` to cross that window — real coordinator I/O is still awaited
+  in real time, but the deadline itself must stay deterministic.
 - `Persistence.cpp` / `ProjectStore` / `ProjectBackupStore` — checksummed
   envelopes, durable sibling staging file, atomic replace, revisioned
   backup rotation, fail-closed automatic restore.

@@ -106,4 +106,6 @@ It does not prove:
   mode contention;
 - anything about macOS or Linux devices beyond the shared decision logic
   (R-13);
-- plugin state restoration, which remains stored but unconsumed.
+- plugin state restoration, which remains stored but unconsumed and is
+  now owned by P0-013, since consuming a state blob requires a running
+  plugin host.

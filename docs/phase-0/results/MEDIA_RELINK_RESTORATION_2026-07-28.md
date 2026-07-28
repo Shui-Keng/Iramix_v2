@@ -119,5 +119,7 @@ It does not prove:
   or symlink loops in a search directory;
 - resolver cost at reference media scale — the fixture is six small files,
   and no throughput figure should be inferred from it;
-- plugin state restoration or device configuration restoration, which
-  remain stored but unconsumed.
+- plugin state restoration, now owned by P0-013, or device configuration
+  restoration, which is decided in
+  [`DEVICE_CONFIGURATION_RESTORATION`](DEVICE_CONFIGURATION_RESTORATION_2026-07-28.md)
+  but not yet consumed by a backend.

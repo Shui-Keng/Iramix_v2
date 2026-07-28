@@ -828,13 +828,9 @@ void testAutomaticBackupRestore(
            "active_project_replacements=3\n";
 }
 
-// The window must comfortably exceed three durable journal appends, or the
-// coalescing assertions below race the autosave worker instead of testing
-// it: on macOS an fsync trio overruns a 30 ms window, the window fires
-// between edits, and the third markDirty legitimately opens a new window
-// rather than replacing a pending one. Still far below the five-second
-// product window in ADR-0004, so this only paces the test.
-constexpr std::chrono::milliseconds kAutosaveTestWindow {500};
+// Virtual time, so the window is exact rather than a race against fsync.
+// The wall-clock value is arbitrary; nothing waits for it to elapse.
+constexpr std::chrono::milliseconds kAutosaveTestWindow {5'000};
 
 void testAutosaveScheduler(const std::filesystem::path& root) {
     const auto project = root / "autosave-session.irpx";
@@ -842,11 +838,15 @@ void testAutosaveScheduler(const std::filesystem::path& root) {
     auto session =
         iramix::session::JournaledSession::open(project, error);
     require(session != nullptr, error.c_str());
+    auto clock =
+        std::make_shared<iramix::persistence::ManualAutosaveClock>();
     auto service =
         iramix::persistence::SessionPersistenceService::create(
             project,
             kAutosaveTestWindow,
-            error
+            error,
+            0U,
+            clock
         );
     require(service != nullptr, error.c_str());
     require(service->start(error), error.c_str());
@@ -861,7 +861,11 @@ void testAutosaveScheduler(const std::filesystem::path& root) {
             == iramix::persistence::AutosaveDirtyStatus::tracked,
         "first dirty revision starts a fixed autosave window"
     );
-    std::this_thread::sleep_for(std::chrono::milliseconds {5});
+    // Virtual time moves well short of the window, so however long the
+    // durable appends actually take, the deadline cannot pass between
+    // edits. The coalescing assertions now test the scheduler instead of
+    // racing it.
+    clock->advance(std::chrono::milliseconds {5});
     require(
         session->setTempo(2U, 122.0, error).applied(),
         "second autosave edit applies"
@@ -871,7 +875,7 @@ void testAutosaveScheduler(const std::filesystem::path& root) {
             == iramix::persistence::AutosaveDirtyStatus::replaced,
         "newer edit replaces the tracked autosave snapshot"
     );
-    std::this_thread::sleep_for(std::chrono::milliseconds {5});
+    clock->advance(std::chrono::milliseconds {5});
     require(
         session->setTempo(3U, 123.0, error).applied(),
         "third autosave edit applies"
@@ -881,6 +885,14 @@ void testAutosaveScheduler(const std::filesystem::path& root) {
             == iramix::persistence::AutosaveDirtyStatus::replaced,
         "continuous edits coalesce to the latest revision"
     );
+    require(
+        service->autosaveRequestCount() == 0U
+            && service->dirtyRevision() == 4U,
+        "the window has provably not fired before it is due"
+    );
+
+    // Cross the deadline exactly.
+    clock->advance(kAutosaveTestWindow);
 
     const auto timeout = std::chrono::steady_clock::now()
         + std::chrono::seconds {10};
@@ -908,18 +920,17 @@ void testAutosaveScheduler(const std::filesystem::path& root) {
                     SessionSaveQueryStatus::committed
             && query.durableRevision == 4U
             && dirtyRevision == 0U
-            && autosaveRequests >= 1U
-            && autosaveRequests <= 3U
             && dirtyReplacements == 2U,
         "autosave commits the newest continuous-edit revision"
     );
-    // Anchored to the first dirty revision, so three continuous edits must
-    // not push the deadline out: commit lands near the window, not at a
-    // multiple of it.
+    // Exactly one window elapsed, so exactly one autosave was requested.
+    // Together with the zero-request check before the deadline, this is a
+    // stronger non-starvation proof than the wall-clock bound it replaced:
+    // three continuous edits provably did not push the deadline out, and
+    // the result no longer depends on how long an fsync takes.
     require(
-        elapsed < 4.0
-            * static_cast<double>(kAutosaveTestWindow.count()),
-        "autosave fixed window does not starve"
+        autosaveRequests == 1U,
+        "one elapsed window requests exactly one autosave"
     );
     service->stop();
 
@@ -969,11 +980,12 @@ void testAutosaveScheduler(const std::filesystem::path& root) {
     );
 
     std::cout
-        << "Autosave scheduler: interval_ms="
+        << "Autosave scheduler: virtual_window_ms="
         << kAutosaveTestWindow.count()
-        << ", edits=3, autosave_requests=" << autosaveRequests
+        << ", edits=3, requests_before_deadline=0"
+           ", autosave_requests=" << autosaveRequests
         << ", dirty_replacements=" << dirtyReplacements << ", "
-           "durable_revision=4, elapsed_ms=" << elapsed
+           "durable_revision=4, commit_wait_ms=" << elapsed
         << ", shutdown_flush_revision=2\n";
 }
 
