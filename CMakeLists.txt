@@ -52,6 +52,7 @@ add_library(iramix_core STATIC
     src/platform/Platform.cpp
     src/plugin/PluginBridge.cpp
     src/plugin/PluginScanner.cpp
+    src/plugin/Vst3Host.cpp
     src/persistence/AsyncProjectSaver.cpp
     src/persistence/AsyncSessionSaver.cpp
     src/persistence/AutosaveClock.cpp
@@ -120,6 +121,10 @@ iramix_set_warnings(iramix_engine_probe)
 add_executable(iramix_plugin_scan apps/plugin-scan/main.cpp)
 target_link_libraries(iramix_plugin_scan PRIVATE Iramix::Core)
 iramix_set_warnings(iramix_plugin_scan)
+
+add_executable(iramix_plugin_host apps/plugin-host/main.cpp)
+target_link_libraries(iramix_plugin_host PRIVATE Iramix::Core)
+iramix_set_warnings(iramix_plugin_host)
 
 set(IRAMIX_AUDIO_PROBE_SOURCES
     apps/audio-probe/AllocationHooks.cpp
