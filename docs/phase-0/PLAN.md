@@ -144,7 +144,7 @@ Exit evidence:
 | P0-008 | Audio callback probes | Windows open: 64 cadence failed; Core Audio/JACK probes added but target runs pending; proprietary SDK path resolved, signing pending; three 2h soaks pending |
 | P0-009 | User interviews | Not started |
 | P0-010 | Dependency/license inventory | Not started |
-| P0-011 | Immutable real-time graph core | Windows: production nodes, bounded sample-accurate parameters, live WASAPI hot-swap, lossless command completions, and droppable telemetry verified; ramps/modulation, denormals, sanitizer, edit storm, other backends, and final soak pending |
+| P0-011 | Immutable real-time graph core | Windows production path verified; 5,001-publication edit-storm passed on Windows and Linux under ASan/UBSan/TSan; ramps/modulation, denormals, other backends, and final soak pending |
 
 ## Definition of done
 

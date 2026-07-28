@@ -46,6 +46,8 @@ Bounded general commands, lossless completion backpressure, droppable
 telemetry, queue saturation, and live WASAPI command completion are recorded
 in
 [`../phase-0/results/WASAPI_COMMAND_TELEMETRY_WINDOWS_2026-07-28.md`](../phase-0/results/WASAPI_COMMAND_TELEMETRY_WINDOWS_2026-07-28.md).
-This evidence does not replace the two-hour callback soak, sanitizer,
-ramp/modulation, edit-storm, denormal, or cross-platform evidence, so this ADR
-remains proposed.
+Five-topology graph edit-storm results on Windows and Linux, including
+ASan/UBSan and TSan, are recorded in
+[`../phase-0/results/GRAPH_EDIT_STORM_SANITIZERS_2026-07-28.md`](../phase-0/results/GRAPH_EDIT_STORM_SANITIZERS_2026-07-28.md).
+This evidence does not replace the two-hour callback soak, ramp/modulation,
+denormal, or target-hardware backend evidence, so this ADR remains proposed.
