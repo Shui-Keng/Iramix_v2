@@ -1,6 +1,10 @@
 #include "iramix/plugin/PluginBridge.hpp"
 
 #include "iramix/persistence/SessionDocument.hpp"
+#include "iramix/plugin/PluginScanner.hpp"
+
+#include <fstream>
+#include <system_error>
 
 #include <algorithm>
 #include <chrono>
@@ -874,12 +878,173 @@ void testParameterLateAndSaturation(const std::filesystem::path& self) {
         << ", after_stop=1\n";
 }
 
+class TemporaryDirectory final {
+public:
+    TemporaryDirectory() {
+        const auto suffix = std::chrono::steady_clock::now()
+            .time_since_epoch()
+            .count();
+        path_ = std::filesystem::temp_directory_path()
+            / ("iramix-plugin-" + std::to_string(suffix));
+        std::filesystem::create_directories(path_);
+    }
+
+    ~TemporaryDirectory() {
+        std::error_code ignored;
+        std::filesystem::remove_all(path_, ignored);
+    }
+
+    [[nodiscard]] const std::filesystem::path& path() const noexcept {
+        return path_;
+    }
+
+private:
+    std::filesystem::path path_;
+};
+
+void writeStubFile(const std::filesystem::path& path) {
+    std::filesystem::create_directories(path.parent_path());
+    std::ofstream file {path, std::ios::binary | std::ios::trunc};
+    file << "not a real module";
+}
+
+// Discovery is pure filesystem logic, so it is asserted against a
+// synthetic tree. That is the point of taking search roots as an argument:
+// the layout rules are testable on a machine with no plugins installed,
+// which includes every CI runner.
+void testPluginDiscovery() {
+    namespace plugin = iramix::plugin;
+    const TemporaryDirectory root;
+    const auto base = root.path();
+
+#if defined(_WIN32)
+    const std::string architecture = "x86_64-win";
+#elif defined(__APPLE__)
+    const std::string architecture = "MacOS";
+#else
+    const std::string architecture = "x86_64-linux";
+#endif
+
+    // A bundle: the candidate is the binary inside, but the identity the
+    // user recognises is the bundle directory.
+    const auto bundle = base / "vst3" / "Bundled.vst3";
+    writeStubFile(bundle / "Contents" / architecture / "Bundled.vst3");
+    // A plain module file, still common and still legal.
+    writeStubFile(base / "vst3" / "Flat.vst3");
+    // Vendors nest, so an unnested walk would miss most of a real install.
+    writeStubFile(base / "clap" / "Vendor" / "Nested.clap");
+    // Neither of these is a plugin.
+    writeStubFile(base / "vst3" / "readme.txt");
+    writeStubFile(base / "vst3" / "Support.dll");
+    // A bundle with no binary for this platform is not a candidate: it
+    // ships other architectures only.
+    std::filesystem::create_directories(
+        base / "vst3" / "Foreign.vst3" / "Contents" / "ppc-something"
+    );
+
+    const std::vector<std::filesystem::path> roots {
+        base / "vst3",
+        base / "clap",
+        base / "does-not-exist",
+    };
+    const auto found = plugin::discoverPlugins(roots);
+
+    require(found.size() == 3U, "exactly the three modules are found");
+    // Deterministic order, so a scan cache and a result document do not
+    // depend on directory iteration order.
+    require(
+        std::is_sorted(
+            found.begin(),
+            found.end(),
+            [](const auto& left, const auto& right) {
+                return left.bundlePath < right.bundlePath;
+            }
+        ),
+        "discovery order is deterministic"
+    );
+
+    std::size_t bundles = 0U;
+    std::size_t claps = 0U;
+    for (const auto& candidate : found) {
+        require(
+            std::filesystem::is_regular_file(candidate.modulePath),
+            "every candidate names a file that exists"
+        );
+        if (candidate.format == plugin::PluginModuleFormat::clap) {
+            ++claps;
+            require(
+                candidate.modulePath == candidate.bundlePath,
+                "a CLAP module is its own bundle"
+            );
+        }
+        if (candidate.bundlePath == bundle) {
+            ++bundles;
+            require(
+                candidate.modulePath
+                    == bundle / "Contents" / architecture / "Bundled.vst3",
+                "a bundle resolves to the binary inside it"
+            );
+        }
+    }
+    require(bundles == 1U, "the bundle is reported once, not twice");
+    require(claps == 1U, "the nested CLAP module is found");
+
+    require(
+        plugin::discoverPlugins({}).empty(),
+        "no search roots yields no candidates"
+    );
+
+    std::cout
+        << "Plugin discovery: roots=" << roots.size()
+        << ", candidates=" << found.size()
+        << ", bundles=" << bundles
+        << ", clap=" << claps
+        << ", foreign_bundle_skipped=1, non_modules_skipped=2\n";
+}
+
+// A module that is not a plugin must be rejected by the scanner rather
+// than crashing it, and the verdict must come from a separate process.
+void testScanRejectsNonPlugin(const std::filesystem::path& self) {
+    namespace plugin = iramix::plugin;
+    const TemporaryDirectory root;
+    const auto fake = root.path() / "NotAPlugin.vst3";
+    writeStubFile(fake);
+
+    const plugin::PluginScanCandidate candidate {
+        .modulePath = fake,
+        .bundlePath = fake,
+        .format = plugin::PluginModuleFormat::vst3,
+    };
+    const auto record = plugin::scanCandidate(
+        candidate,
+        self,
+        std::chrono::seconds {10}
+    );
+    require(
+        record.status == plugin::PluginScanStatus::loadFailed
+            || record.status == plugin::PluginScanStatus::notAPlugin,
+        "a file that is not a module is refused, not loaded"
+    );
+    require(
+        record.name.empty() && record.classCount == 0U,
+        "a refused module contributes no metadata"
+    );
+
+    std::cout
+        << "Plugin scan rejection: garbage_module=1, host_survived=1, "
+           "metadata_invented=0\n";
+}
+
 } // namespace
 
 int main(const int argc, char* argv[]) {
     if (argc == 4
         && std::string_view {argv[1]} == "--plugin-bridge-child") {
         return iramix::plugin::PluginBridge::runChild(argv[2], argv[3]);
+    }
+    if (argc == 5
+        && std::string_view {argv[1]} == "--plugin-scan-child") {
+        return iramix::plugin::runScanChild(argv[2], argv[3], argv[4]);
     }
 
     const auto self = std::filesystem::absolute(argv[0]);
@@ -892,6 +1057,8 @@ int main(const int argc, char* argv[]) {
     testPluginStateOnDeadPlugin(self);
     testParameterTransport(self);
     testParameterLateAndSaturation(self);
+    testPluginDiscovery();
+    testScanRejectsNonPlugin(self);
     std::cout << "All Iramix plugin tests passed.\n";
     return EXIT_SUCCESS;
 }
