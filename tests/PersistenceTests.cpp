@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -102,9 +103,9 @@ template <typename Predicate>
 ) {
     require(!values.empty(), "percentile input is non-empty");
     std::sort(values.begin(), values.end());
-    const auto rank = static_cast<std::size_t>(
-        percentile * static_cast<double>(values.size() - 1U)
-    );
+    const auto rank = static_cast<std::size_t>(std::ceil(
+        percentile * static_cast<double>(values.size())
+    )) - 1U;
     return values[rank];
 }
 
@@ -216,6 +217,52 @@ void testSessionDocumentRoundTrip(
             .name = "Master",
         },
     };
+    source.clips = {
+        {
+            .stableId = 2'001U,
+            .trackId = 101U,
+            .sourceId = 50'001U,
+            .startFrame = 0U,
+            .lengthFrames = 48'000U,
+            .sourceOffsetFrames = 1'024U,
+            .gain = 0.8F,
+            .muted = false,
+            .name = "Texture",
+        },
+        {
+            .stableId = 2'002U,
+            .trackId = 205U,
+            .sourceId = 50'002U,
+            .startFrame = 96'000U,
+            .lengthFrames = 24'000U,
+            .sourceOffsetFrames = 0U,
+            .gain = 1.0F,
+            .muted = true,
+            .name = "Phrase",
+        },
+    };
+    source.routes = {
+        {
+            .stableId = 3'001U,
+            .sourceTrackId = 101U,
+            .destinationTrackId = 999U,
+            .gain = 0.9F,
+            .enabled = true,
+        },
+    };
+    source.automationLanes = {
+        {
+            .stableId = 4'001U,
+            .targetTrackId = 205U,
+            .parameter =
+                iramix::persistence::SessionParameterId::gain,
+            .points = {
+                {.samplePosition = 0U, .value = 0.25F},
+                {.samplePosition = 48'000U, .value = 0.75F},
+                {.samplePosition = 96'000U, .value = 1.0F},
+            },
+        },
+    };
 
     std::string error;
     const auto currentBytes =
@@ -244,13 +291,25 @@ void testSessionDocumentRoundTrip(
             && decoded.document.tracks[1].color
                 == 0xFFAA'5500U
             && decoded.document.tracks[2].type
-                == iramix::persistence::SessionTrackType::master,
+                == iramix::persistence::SessionTrackType::master
+            && decoded.document.clips.size() == 2U
+            && decoded.document.clips[1].muted
+            && decoded.document.routes.size() == 1U
+            && decoded.document.routes[0].destinationTrackId
+                == 999U
+            && decoded.document.automationLanes.size() == 1U
+            && decoded.document.automationLanes[0].points.size()
+                == 3U,
         "current session schema round trips deterministically"
     );
 
+    auto legacySource = source;
+    legacySource.clips.clear();
+    legacySource.routes.clear();
+    legacySource.automationLanes.clear();
     const auto legacyBytes =
         iramix::persistence::serializeSessionDocument(
-            source,
+            legacySource,
             error,
             1U
         );
@@ -273,6 +332,35 @@ void testSessionDocumentRoundTrip(
             ),
         "schema v1 migrates sample rate and track color defaults"
     );
+    const auto schemaV2Bytes =
+        iramix::persistence::serializeSessionDocument(
+            legacySource,
+            error,
+            2U
+        );
+    require(!schemaV2Bytes.empty(), error.c_str());
+    decoded =
+        iramix::persistence::deserializeSessionDocument(
+            schemaV2Bytes
+        );
+    require(
+        decoded.ok()
+            && decoded.sourceSchemaVersion == 2U
+            && decoded.migrated
+            && decoded.document.sampleRate == source.sampleRate
+            && decoded.document.clips.empty()
+            && decoded.document.routes.empty()
+            && decoded.document.automationLanes.empty(),
+        "schema v2 migrates empty v3 entity collections"
+    );
+    require(
+        iramix::persistence::serializeSessionDocument(
+            source,
+            error,
+            2U
+        ).empty(),
+        "lossy export to schema v2 is rejected"
+    );
 
     const auto project = root / "session-round-trip.irpx";
     require(
@@ -293,7 +381,10 @@ void testSessionDocumentRoundTrip(
     require(
         decoded.ok()
             && decoded.document.revision == 42U
-            && decoded.document.tracks.size() == 3U,
+            && decoded.document.tracks.size() == 3U
+            && decoded.document.clips.size() == 2U
+            && decoded.document.routes.size() == 1U
+            && decoded.document.automationLanes.size() == 1U,
         "session document round trips through project envelope"
     );
 
@@ -318,10 +409,20 @@ void testSessionDocumentRoundTrip(
         ).empty(),
         "duplicate stable session IDs are rejected"
     );
+    auto brokenReference = source;
+    brokenReference.clips[0].trackId = 987'654U;
+    require(
+        iramix::persistence::serializeSessionDocument(
+            brokenReference,
+            error
+        ).empty(),
+        "dangling session references are rejected"
+    );
 
     std::cout
-        << "Session document: current_schema=2, tracks=3, "
-           "stable_ids=3, v1_migrations=1, "
+        << "Session document: current_schema=3, tracks=3, "
+           "clips=2, routes=1, automation_lanes=1, "
+           "v1_migrations=1, v2_migrations=1, "
            "unknown_schemas_rejected=1, project_round_trips=1\n";
 }
 
@@ -572,6 +673,235 @@ void testAsyncProjectSaver(
         << ", submit_p99_ms=" << submitP99
         << ", submit_max_ms=" << submitMaximum
         << ", injected_failures=1, explicit_full_rejections=1\n";
+}
+
+[[nodiscard]] iramix::persistence::SessionDocument
+makeReferenceSession() {
+    constexpr std::uint64_t trackBase = 10'000U;
+    constexpr std::uint64_t clipBase = 100'000U;
+    constexpr std::uint64_t routeBase = 200'000U;
+    constexpr std::uint64_t automationBase = 300'000U;
+    constexpr std::uint64_t sourceBase = 1'000'000U;
+    constexpr std::size_t trackCount = 200U;
+    constexpr std::size_t clipCount = 2'000U;
+    constexpr std::size_t automationLaneCount = 40U;
+    constexpr std::size_t pointsPerLane = 1'000U;
+
+    iramix::persistence::SessionDocument document;
+    document.revision = 10'000U;
+    document.sampleRate = 48'000U;
+    document.tempo = 128.0;
+    document.tracks.reserve(trackCount);
+    for (std::size_t index = 0U; index < trackCount; ++index) {
+        document.tracks.push_back({
+            .stableId = trackBase + index,
+            .type = index + 1U == trackCount
+                ? iramix::persistence::SessionTrackType::master
+                : (index % 2U == 0U
+                    ? iramix::persistence::SessionTrackType::audio
+                    : iramix::persistence::
+                        SessionTrackType::instrument),
+            .gain = 0.9F,
+            .color = 0xFF20'3040U
+                + static_cast<std::uint32_t>(index),
+            .name = "Reference track " + std::to_string(index),
+        });
+    }
+
+    document.clips.reserve(clipCount);
+    for (std::size_t index = 0U; index < clipCount; ++index) {
+        const auto trackIndex = index % (trackCount - 1U);
+        document.clips.push_back({
+            .stableId = clipBase + index,
+            .trackId = trackBase + trackIndex,
+            .sourceId = sourceBase + index,
+            .startFrame = static_cast<std::uint64_t>(index)
+                * 12'000U,
+            .lengthFrames = 24'000U,
+            .sourceOffsetFrames =
+                static_cast<std::uint64_t>(index % 8U) * 512U,
+            .gain = 1.0F,
+            .muted = index % 97U == 0U,
+            .name = "Reference clip " + std::to_string(index),
+        });
+    }
+
+    const auto masterId = trackBase + trackCount - 1U;
+    document.routes.reserve(trackCount - 1U);
+    for (std::size_t index = 0U; index + 1U < trackCount; ++index) {
+        document.routes.push_back({
+            .stableId = routeBase + index,
+            .sourceTrackId = trackBase + index,
+            .destinationTrackId = masterId,
+            .gain = 1.0F,
+            .enabled = true,
+        });
+    }
+
+    document.automationLanes.reserve(automationLaneCount);
+    for (
+        std::size_t laneIndex = 0U;
+        laneIndex < automationLaneCount;
+        ++laneIndex
+    ) {
+        iramix::persistence::SessionAutomationLane lane;
+        lane.stableId = automationBase + laneIndex;
+        lane.targetTrackId = trackBase + laneIndex;
+        lane.parameter =
+            iramix::persistence::SessionParameterId::gain;
+        lane.points.reserve(pointsPerLane);
+        for (
+            std::size_t pointIndex = 0U;
+            pointIndex < pointsPerLane;
+            ++pointIndex
+        ) {
+            lane.points.push_back({
+                .samplePosition =
+                    static_cast<std::uint64_t>(pointIndex) * 256U,
+                .value = static_cast<float>(pointIndex % 101U)
+                    / 100.0F,
+            });
+        }
+        document.automationLanes.push_back(std::move(lane));
+    }
+    return document;
+}
+
+void testReferenceProjectBenchmark(
+    const std::filesystem::path& root
+) {
+    constexpr std::size_t benchmarkIterations = 20U;
+    const auto reference = makeReferenceSession();
+    std::string error;
+    std::vector<double> serializationMilliseconds;
+    serializationMilliseconds.reserve(benchmarkIterations);
+    std::vector<std::byte> serialized;
+    for (
+        std::size_t iteration = 0U;
+        iteration < benchmarkIterations;
+        ++iteration
+    ) {
+        const auto started = std::chrono::steady_clock::now();
+        auto candidate =
+            iramix::persistence::serializeSessionDocument(
+                reference,
+                error
+            );
+        const double elapsed =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - started
+            ).count();
+        require(!candidate.empty(), error.c_str());
+        serializationMilliseconds.push_back(elapsed);
+        serialized = std::move(candidate);
+    }
+
+    const auto project = root / "reference-large.irpx";
+    require(
+        iramix::persistence::saveProjectSnapshot(
+            project,
+            serialized,
+            error
+        ),
+        error.c_str()
+    );
+
+    std::vector<double> openMilliseconds;
+    openMilliseconds.reserve(benchmarkIterations);
+    for (
+        std::size_t iteration = 0U;
+        iteration < benchmarkIterations;
+        ++iteration
+    ) {
+        const auto started = std::chrono::steady_clock::now();
+        const auto loaded =
+            iramix::persistence::loadProjectSnapshot(project);
+        require(loaded.ok, loaded.error.c_str());
+        const auto decoded =
+            iramix::persistence::deserializeSessionDocument(
+                loaded.payload
+            );
+        const double elapsed =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - started
+            ).count();
+        require(
+            decoded.ok()
+                && decoded.document.tracks.size() == 200U
+                && decoded.document.clips.size() == 2'000U
+                && decoded.document.routes.size() == 199U
+                && decoded.document.automationLanes.size() == 40U
+                && decoded.document.automationLanes[0].points.size()
+                    == 1'000U,
+            decoded.error.c_str()
+        );
+        openMilliseconds.push_back(elapsed);
+    }
+
+    const double serializeP50 = percentileMilliseconds(
+        serializationMilliseconds,
+        0.50
+    );
+    const double serializeP95 = percentileMilliseconds(
+        serializationMilliseconds,
+        0.95
+    );
+    const double serializeP99 = percentileMilliseconds(
+        serializationMilliseconds,
+        0.99
+    );
+    const double openP50 = percentileMilliseconds(
+        openMilliseconds,
+        0.50
+    );
+    const double openP95 = percentileMilliseconds(
+        openMilliseconds,
+        0.95
+    );
+    const double openP99 = percentileMilliseconds(
+        openMilliseconds,
+        0.99
+    );
+    const double serializeMaximum = *std::max_element(
+        serializationMilliseconds.begin(),
+        serializationMilliseconds.end()
+    );
+    const double openMaximum = *std::max_element(
+        openMilliseconds.begin(),
+        openMilliseconds.end()
+    );
+    require(
+        openP99 < 5'000.0,
+        "reference project open p99 stays below five seconds"
+    );
+
+    auto truncated = serialized;
+    truncated.pop_back();
+    require(
+        !iramix::persistence::deserializeSessionDocument(
+            truncated
+        ).ok(),
+        "truncated schema v3 project is rejected"
+    );
+
+    std::error_code fileSizeError;
+    const auto projectBytes =
+        std::filesystem::file_size(project, fileSizeError);
+    require(!fileSizeError, fileSizeError.message().c_str());
+    std::cout
+        << "Reference project: tracks=200, clips=2000, routes=199, "
+           "automation_lanes=40, automation_points=40000, "
+           "project_bytes=" << projectBytes
+        << ", iterations=" << benchmarkIterations
+        << ", serialize_p50_ms=" << serializeP50
+        << ", serialize_p95_ms=" << serializeP95
+        << ", serialize_p99_ms=" << serializeP99
+        << ", serialize_max_ms=" << serializeMaximum
+        << ", open_p50_ms=" << openP50
+        << ", open_p95_ms=" << openP95
+        << ", open_p99_ms=" << openP99
+        << ", open_max_ms=" << openMaximum
+        << ", truncated_projects_rejected=1\n";
 }
 
 void testCommandJournal(const std::filesystem::path& root) {
@@ -1106,6 +1436,7 @@ int main(const int argc, char* argv[]) {
     testAtomicProjectStore(temporary.path());
     testSessionDocumentRoundTrip(temporary.path());
     testAsyncProjectSaver(temporary.path());
+    testReferenceProjectBenchmark(temporary.path());
     testCommandJournal(temporary.path());
     testRecoverableRecording(
         std::filesystem::absolute(argv[0]),

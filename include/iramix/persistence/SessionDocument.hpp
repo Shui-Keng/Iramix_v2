@@ -8,7 +8,7 @@
 
 namespace iramix::persistence {
 
-inline constexpr std::uint32_t currentSessionSchemaVersion = 2U;
+inline constexpr std::uint32_t currentSessionSchemaVersion = 3U;
 
 enum class SessionTrackType : std::uint32_t {
     audio = 1U,
@@ -26,11 +26,52 @@ struct SessionTrack final {
     std::string name;
 };
 
+struct SessionClip final {
+    std::uint64_t stableId {0U};
+    std::uint64_t trackId {0U};
+    std::uint64_t sourceId {0U};
+    std::uint64_t startFrame {0U};
+    std::uint64_t lengthFrames {0U};
+    std::uint64_t sourceOffsetFrames {0U};
+    float gain {1.0F};
+    bool muted {false};
+    std::string name;
+};
+
+struct SessionRoute final {
+    std::uint64_t stableId {0U};
+    std::uint64_t sourceTrackId {0U};
+    std::uint64_t destinationTrackId {0U};
+    float gain {1.0F};
+    bool enabled {true};
+};
+
+enum class SessionParameterId : std::uint32_t {
+    gain = 1U,
+    pan = 2U,
+    mute = 3U,
+};
+
+struct SessionAutomationPoint final {
+    std::uint64_t samplePosition {0U};
+    float value {0.0F};
+};
+
+struct SessionAutomationLane final {
+    std::uint64_t stableId {0U};
+    std::uint64_t targetTrackId {0U};
+    SessionParameterId parameter {SessionParameterId::gain};
+    std::vector<SessionAutomationPoint> points;
+};
+
 struct SessionDocument final {
     std::uint64_t revision {0U};
     std::uint32_t sampleRate {48'000U};
     double tempo {120.0};
     std::vector<SessionTrack> tracks;
+    std::vector<SessionClip> clips;
+    std::vector<SessionRoute> routes;
+    std::vector<SessionAutomationLane> automationLanes;
 };
 
 struct SessionDecodeResult final {
