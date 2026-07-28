@@ -9,14 +9,16 @@
 #include "iramix/persistence/ProjectStore.hpp"
 #include "iramix/persistence/SessionDocument.hpp"
 
+// windows.h first: the COM headers below depend on it, and alphabetical
+// order breaks the MSVC build even though MinGW tolerates it.
+#include <windows.h>
+
 #include <audioclient.h>
 #include <audiosessiontypes.h>
 #include <avrt.h>
-#include <functiondiscoverykeys_devpkey.h>
 #include <ksmedia.h>
 #include <mmdeviceapi.h>
 #include <propvarutil.h>
-#include <windows.h>
 #include <wrl/client.h>
 
 #include <algorithm>
@@ -651,6 +653,24 @@ void requireSuccess(const HRESULT result, const char* operation) {
     return result;
 }
 
+// PKEY_Device_FriendlyName, defined here rather than pulled in from
+// functiondiscoverykeys_devpkey.h. That header only declares the key
+// unless INITGUID is set, leaving the symbol to be resolved from whichever
+// import library the toolchain happens to supply, and it must follow a
+// header that defines DEFINE_PROPERTYKEY. Both are toolchain-dependent
+// assumptions this file cannot verify on the one platform it builds on.
+// The value is a published, stable constant, copied from the Windows SDK
+// header itself.
+constexpr PROPERTYKEY kDeviceFriendlyName {
+    {
+        0xa45c254e,
+        0xdf1c,
+        0x4efd,
+        {0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0},
+    },
+    14U,
+};
+
 struct CoTaskString final {
     LPWSTR value {nullptr};
 
@@ -745,7 +765,7 @@ void describeEndpoint(
         PropVariant name;
         if (SUCCEEDED(
                 properties->GetValue(
-                    PKEY_Device_FriendlyName,
+                    kDeviceFriendlyName,
                     &name.value
                 )
             )
