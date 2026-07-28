@@ -96,6 +96,9 @@ separate bounded queue; it may drop under saturation, with every drop counted.
 ### Service workers and processes
 
 - Stream audio from disk.
+- Drain recording blocks from a preallocated callback-to-worker SPSC queue.
+- Fill playback read-ahead through a preallocated worker-to-callback SPSC
+  queue; callback underflow produces silence and an explicit counter.
 - Build waveform and spectral caches.
 - Scan and host plugins.
 - Index browser content.
@@ -155,5 +158,13 @@ The Phase 0 persistence foundation writes checksummed snapshots to a durable
 sibling staging file before atomic replacement. Persistent commands use a
 strictly sequenced, checksummed append-only journal whose durable append is the
 ACK boundary. Recording staging uses sequenced, checksummed audio blocks;
-recovery accepts only the longest valid prefix. Large-file streaming and
-worker-thread integration remain pending.
+recovery accepts only the longest valid prefix. The production scanner
+validates payloads incrementally with a fixed 64 KiB scratch buffer and can
+truncate only the invalid suffix. Recording and playback use fixed-capacity
+SPSC queues whose callback-facing operations perform copies plus lock-free
+atomic publication only. Filesystem and durable-flush work runs on disk worker
+threads.
+
+The first worker slice is not yet connected to live session routing or device
+capture. Asynchronous project snapshots, final media conversion, migrations,
+and reference-project timing remain pending.

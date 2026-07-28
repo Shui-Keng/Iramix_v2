@@ -117,6 +117,16 @@ blocks after a child process exited at an injected crash point. Two durable
 journal appends took 6 ms in the local MSVC run. Large-file streaming,
 reference-project open time, and the UI-stall budget remain unmeasured.
 
+The follow-up
+[`bounded disk-audio worker screening`](results/DISK_AUDIO_WORKERS_2026-07-28.md)
+validated a two-slot recording queue, two-slot playback read-ahead, explicit
+recording rejection, and deterministic silence on playback underflow. The
+allocation hook reported zero callback allocations/deallocations and zero
+tracked blocking locks. A 4,243,472-byte, 2,048-block recording was validated
+with a fixed 65,536-byte scanner scratch buffer and no sample materialization.
+This is deterministic worker/format evidence, not device-stream dropout or
+full reference-recording performance evidence.
+
 ## Plugin bridge
 
 - bridge overhead target: below 5% of one core for 100 pass-through instances at

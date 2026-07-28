@@ -21,6 +21,14 @@ single crash capable of destroying otherwise valid work.
   checksummed audio blocks.
 - Recovery accepts only the longest valid prefix. Partial, corrupt, or
   out-of-sequence suffixes are discarded.
+- Production recovery scans payloads incrementally with a fixed 64 KiB scratch
+  buffer. Tail repair truncates only the validated invalid suffix.
+- Recording and playback cross the callback boundary through separate,
+  preallocated, fixed-capacity SPSC block queues. The recording callback
+  rejects a block when full; playback emits silence and counts an underflow
+  when no block is ready.
+- Filesystem calls, CRC work, durable flushes, and queue allocation remain on
+  control or disk-worker threads.
 - Project, journal, recording, and IPC schema versions remain independent.
 - No persistence operation may run on an audio callback.
 
@@ -36,6 +44,9 @@ File durability uses `_commit` on Windows and `fsync` on POSIX.
 - Forced process termination during recording preserves every durably flushed
   block.
 - Corrupt recording blocks and their suffix are rejected.
+- Recording and read-ahead queue saturation remains bounded and observable.
+- Allocation-tracking hooks report zero callback allocation/deallocation and
+  zero tracked blocking locks for enqueue, dequeue, and underflow paths.
 - Large-file streaming, reference-project open time, and UI-stall budgets pass
   independently.
 
@@ -44,7 +55,11 @@ File durability uses `_commit` on Windows and `fsync` on POSIX.
 Windows, macOS, Linux, ASan/UBSan, and TSan evidence is recorded in
 [`../phase-0/results/PERSISTENCE_RECOVERY_2026-07-28.md`](../phase-0/results/PERSISTENCE_RECOVERY_2026-07-28.md).
 
-The current recovery helper materializes test audio in memory and the snapshot
-save call is synchronous. Read-ahead, streaming large-file recovery, worker
-integration, final media conversion, and large-project timing remain pending,
-so this ADR remains proposed.
+The production scanner/reader and bounded disk workers are implemented. The
+legacy `recoverRecording` helper still materializes samples for tests and
+small imports, while production streaming uses `scanRecording` and
+`RecoverableRecordingReader`.
+
+Snapshot save remains synchronous. Final media conversion, session integration,
+full-scale large-recording timing, migrations, and large-project open/UI-stall
+measurements remain pending, so this ADR remains proposed.

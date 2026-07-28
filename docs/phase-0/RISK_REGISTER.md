@@ -40,5 +40,7 @@ R-06 has initial mitigation evidence in
 [`results/PERSISTENCE_RECOVERY_2026-07-28.md`](results/PERSISTENCE_RECOVERY_2026-07-28.md):
 atomic snapshot failure injection, journal-tail repair, and forced-process-exit
 recording recovery pass on Windows, macOS, Linux, ASan/UBSan, and TSan. The
-risk remains open until large-file streaming, full session round trips,
-migration drills, and reference-project benchmarks pass.
+risk is further reduced by fixed-memory recording scans, invalid-tail
+truncation, and bounded recording/read-ahead queues with explicit pressure
+behavior. It remains open until full-scale recording runs, full session round
+trips, migration drills, and reference-project benchmarks pass.

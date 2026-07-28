@@ -80,18 +80,21 @@ durability time of 0 ms at millisecond resolution.
 ## Evidence boundary
 
 This proves the initial atomicity, ordering, checksum, and forced-process-exit
-contracts. It does not yet prove the full Week 6 exit gate:
+contracts. The follow-up
+[`bounded disk-audio worker screening`](DISK_AUDIO_WORKERS_2026-07-28.md)
+adds fixed-memory streaming scan/repair plus preallocated recording and
+read-ahead queues.
 
-- recovery currently materializes test audio in memory rather than streaming
-  large recordings;
+The combined evidence still does not prove the full Week 6 exit gate:
+
 - the current test helper is not final WAV/CAF media conversion;
 - snapshot save is synchronous and has not yet been moved behind a worker
   boundary;
 - the below-16-ms UI-stall budget is therefore not claimed;
 - reference-large-project open below five seconds is not measured;
-- disk read-ahead and recording queue pressure are not implemented;
+- worker queues are not yet connected to live session/device routing;
 - migration and full session-model round-trip tests remain pending.
 
-Next work is a bounded read-ahead/recording worker with streaming large-file
-scan and repair, followed by worker-thread project save and reference-project
-benchmarks.
+Next work is worker-thread project save plus session-model round-trip and
+migration infrastructure, followed by live disk-worker integration and
+reference-project benchmarks.
