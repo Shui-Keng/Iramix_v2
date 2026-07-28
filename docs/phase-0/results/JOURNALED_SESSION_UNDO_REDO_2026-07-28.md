@@ -1,7 +1,7 @@
 # Journaled Session and Undo/Redo — 2026-07-28
 
-Status: local Windows MSVC/GCC correctness passed; hosted three-OS Java/C++
-and sanitizer verification pending. P0-012 remains open.
+Status: local Windows MSVC/GCC and hosted three-OS Java/C++ plus sanitizer
+verification passed. P0-012 remains open.
 
 ## Scope
 
@@ -95,6 +95,27 @@ must be evaluated while retaining explicit durability semantics.
 - Local Java 21/Gradle verification is unavailable on this machine; the
   existing runtime is older and has no `javac` or Gradle installation. Hosted
   CI is the Java and three-OS portability gate for this slice.
+
+## Hosted verification
+
+Source commit:
+`07517f47766ebd6af4474e6017a7d652d7d69dd0`
+
+GitHub Actions:
+[`30346059028`](https://github.com/Shui-Keng/Iramix_v2/actions/runs/30346059028)
+
+- Windows Server 2022: six CTest targets and Java 21 architecture/load smoke
+  passed.
+- macOS hosted runner: six CTest targets and Java 21 architecture/load smoke
+  passed.
+- Ubuntu hosted runner: six CTest targets and Java 21 architecture/load smoke
+  passed.
+- ASan/UBSan: all six CTest targets passed without diagnostics.
+- TSan: all six CTest targets passed without diagnostics.
+
+The Java architecture smoke includes edit → undo → redo → concurrent saves,
+process shutdown, project/journal reopen, recovered undo, and durable save of
+the recovered revision.
 
 ## Evidence boundary
 
