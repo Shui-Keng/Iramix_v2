@@ -176,13 +176,17 @@ When extending `SessionDocument`:
 
 The local toolchain is GCC/MinGW (MSYS2 UCRT64); CI additionally builds
 MSVC, AppleClang, and Linux GCC. **A green local build proves very little
-about portability** — this has already bitten twice:
+about portability** — this has already bitten three times:
 
 - `std::uintmax_t` is `unsigned long` on libc++ but `unsigned long long`
   here, so `std::min(fileSize, someUint64)` compiled on Windows and Linux
   and failed to deduce on macOS. Convert explicitly.
 - Windows SDK headers are order-sensitive and MinGW is far more forgiving
   than MSVC. `windows.h` comes first, not alphabetically.
+- macOS caps POSIX shared-memory and semaphore names at 31 characters
+  including the leading slash, and reports only a generic open failure
+  past that. Linux and Windows have no such limit. Keep kernel object
+  names short (`PluginBridge.cpp` derives them from a hex token).
 
 When a construct's portability cannot be verified from this machine,
 prefer the form that does not depend on the unverifiable assumption.

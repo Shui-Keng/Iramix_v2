@@ -40,6 +40,7 @@ add_library(iramix_core STATIC
     src/audio/RenderPlanExecutor.cpp
     src/ipc/Protocol.cpp
     src/platform/Platform.cpp
+    src/plugin/PluginBridge.cpp
     src/persistence/AsyncProjectSaver.cpp
     src/persistence/AsyncSessionSaver.cpp
     src/persistence/AutosaveClock.cpp
@@ -64,6 +65,14 @@ target_include_directories(iramix_core
         "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
 )
 iramix_set_warnings(iramix_core)
+
+# shm_open lives in librt on glibc older than 2.34; harmless where it does not.
+if(UNIX AND NOT APPLE)
+    find_library(IRAMIX_RT_LIBRARY rt)
+    if(IRAMIX_RT_LIBRARY)
+        target_link_libraries(iramix_core PUBLIC ${IRAMIX_RT_LIBRARY})
+    endif()
+endif()
 
 add_executable(iramix_engine_probe apps/engine-probe/main.cpp)
 target_link_libraries(iramix_engine_probe PRIVATE Iramix::Core)
@@ -205,6 +214,18 @@ if(IRAMIX_BUILD_TESTS)
     add_test(
         NAME iramix.session
         COMMAND iramix_session_tests
+    )
+
+    add_executable(iramix_plugin_tests tests/PluginTests.cpp)
+    target_link_libraries(
+        iramix_plugin_tests
+        PRIVATE
+            Iramix::Core
+    )
+    iramix_set_warnings(iramix_plugin_tests)
+    add_test(
+        NAME iramix.plugin
+        COMMAND iramix_plugin_tests
     )
 
     add_test(
