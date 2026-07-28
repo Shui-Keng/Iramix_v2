@@ -98,6 +98,22 @@ fails. Completion fields `backup_status`, `backup_ns`, `backup_pruned`, and
 production default keeps ten strict `revision-<20 digits>.irpx` files in
 `<project>.backups/`. Unknown directory contents are never pruning targets.
 
+On open, an unreadable, missing, schema-invalid, or checkpoint-stale active
+project triggers newest-first backup selection. A candidate must pass envelope
+validation, session-schema validation, exact filename/embedded-revision
+matching, and command-journal replay before it atomically replaces the active
+project. `SESSION_STATE` exposes `recovered_from_backup`,
+`recovered_backup_revision`, and `skipped_backups`. If replay advances beyond
+the restored snapshot, that live revision immediately enters fixed-window
+autosave tracking.
+
+Each new journal and compacted journal carries an explicit durable snapshot
+baseline. Backups older than that baseline or newer than the journal's final
+valid sequence are rejected. A legacy journal without the marker accepts only
+a backup exactly matching its last valid sequence; this intentionally prefers
+an explicit recovery failure over an apparently successful but unverified
+reconstruction.
+
 An unknown revision returns `none` from `POLL_SAVE_COMPLETION` because a timed
 autosave may not yet have reached its fixed deadline. This lets the UI wait for
 autosave without first issuing `SAVE_SESSION`.

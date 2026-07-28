@@ -136,3 +136,7 @@ baseline before replacing the active project.
 
 Hosted CI is portability and sanitizer evidence, not storage-hardware or
 power-loss evidence.
+
+Subsequent automatic selection, journal-baseline validation, and active-project
+replacement evidence is recorded in
+[`AUTOMATIC_BACKUP_RESTORE_2026-07-28.md`](AUTOMATIC_BACKUP_RESTORE_2026-07-28.md).

@@ -219,6 +219,32 @@ int runIpcSession(
                 << setupError << '\n';
             return 5;
         }
+        if (journaledSession->currentRevision()
+            > journaledSession->snapshotRevision()) {
+            try {
+                const auto recoveryDirty =
+                    persistenceService->markDirty(
+                        journaledSession->snapshot()
+                    );
+                if (recoveryDirty
+                        != iramix::persistence::
+                            AutosaveDirtyStatus::tracked
+                    && recoveryDirty
+                        != iramix::persistence::
+                            AutosaveDirtyStatus::replaced) {
+                    std::cerr
+                        << "Recovered journal state could not enter "
+                           "autosave tracking\n";
+                    persistenceService->stop();
+                    return 5;
+                }
+            } catch (const std::bad_alloc&) {
+                std::cerr
+                    << "Recovered journal snapshot allocation failed\n";
+                persistenceService->stop();
+                return 5;
+            }
+        }
     }
     const auto currentRevision = [&]() noexcept {
         return journaledSession != nullptr
@@ -360,6 +386,21 @@ int runIpcSession(
                     + ";checkpoint_revision="
                     + std::to_string(
                         journaledSession->checkpointRevision()
+                    )
+                    + ";recovered_from_backup="
+                    + std::to_string(
+                        journaledSession->recoveredFromBackup()
+                            ? 1U
+                            : 0U
+                    )
+                    + ";recovered_backup_revision="
+                    + std::to_string(
+                        journaledSession->
+                            recoveredBackupRevision()
+                    )
+                    + ";skipped_backups="
+                    + std::to_string(
+                        journaledSession->skippedBackupCount()
                     );
             }
         } else if (request.type == MessageType::setTempo) {

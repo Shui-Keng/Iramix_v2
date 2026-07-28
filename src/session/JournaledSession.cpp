@@ -23,6 +23,7 @@ constexpr std::array<std::byte, 4> kCommandMagic {
     std::byte {'1'},
 };
 constexpr std::uint32_t kCommandSchemaVersion = 1U;
+constexpr std::uint32_t kCheckpointBaselineAction = 4U;
 constexpr std::size_t kMaximumCommandNameBytes = 1'024U;
 
 void appendU32(
@@ -170,9 +171,25 @@ void appendCommand(
     return bytes;
 }
 
+[[nodiscard]] std::vector<std::byte> encodeCheckpointBaseline(
+    const std::uint64_t revision
+) {
+    std::vector<std::byte> bytes;
+    bytes.reserve(20U);
+    bytes.insert(bytes.end(), kCommandMagic.begin(), kCommandMagic.end());
+    appendU32(bytes, kCommandSchemaVersion);
+    appendU32(
+        bytes,
+        kCheckpointBaselineAction
+    );
+    appendU64(bytes, revision);
+    return bytes;
+}
+
 [[nodiscard]] bool decodeRecord(
     const std::span<const std::byte> bytes,
     std::uint32_t& action,
+    std::uint64_t& checkpointBaseline,
     SessionCommand& forward,
     SessionCommand& inverse
 ) {
@@ -186,12 +203,20 @@ void appendCommand(
     }
     std::size_t offset = kCommandMagic.size();
     std::uint32_t version = 0U;
-    return readU32(bytes, offset, version)
-        && version == kCommandSchemaVersion
-        && readU32(bytes, offset, action)
-        && action >= 1U
-        && action <= 3U
-        && readCommand(bytes, offset, forward)
+    checkpointBaseline = 0U;
+    if (!readU32(bytes, offset, version)
+        || version != kCommandSchemaVersion
+        || !readU32(bytes, offset, action)
+        || action < 1U
+        || action > 4U) {
+        return false;
+    }
+    if (action == kCheckpointBaselineAction) {
+        return readU64(bytes, offset, checkpointBaseline)
+            && checkpointBaseline != 0U
+            && offset == bytes.size();
+    }
+    return readCommand(bytes, offset, forward)
         && readCommand(bytes, offset, inverse)
         && offset == bytes.size();
 }
@@ -274,6 +299,68 @@ void appendCommand(
     return track == document.tracks.end() ? nullptr : &*track;
 }
 
+struct JournalRestoreRequirement final {
+    std::uint64_t minimumSnapshotRevision {0U};
+    std::uint64_t maximumSnapshotRevision {0U};
+    std::string error;
+    bool hasCommands {false};
+    bool hasExplicitBaseline {false};
+    bool ok {false};
+};
+
+[[nodiscard]] JournalRestoreRequirement inspectJournalForRestore(
+    const std::filesystem::path& journalPath
+) {
+    JournalRestoreRequirement result;
+    const auto recovered =
+        persistence::recoverCommandJournal(journalPath);
+    if (!recovered.ok()) {
+        result.error = recovered.error;
+        return result;
+    }
+    if (recovered.commands.empty()) {
+        result.ok = true;
+        return result;
+    }
+    result.hasCommands = true;
+    result.maximumSnapshotRevision =
+        recovered.commands.back().sequence;
+
+    std::uint32_t action = 0U;
+    std::uint64_t checkpointBaseline = 0U;
+    SessionCommand forward;
+    SessionCommand inverse;
+    if (!decodeRecord(
+            recovered.commands.front().payload,
+            action,
+            checkpointBaseline,
+            forward,
+            inverse
+        )) {
+        result.error =
+            "cannot inspect first session command for backup restore";
+        return result;
+    }
+    if (action == kCheckpointBaselineAction) {
+        if (recovered.commands.front().sequence
+                > checkpointBaseline
+            || recovered.commands.back().sequence
+                < checkpointBaseline) {
+            result.error = "invalid journal checkpoint baseline";
+            return result;
+        }
+        result.minimumSnapshotRevision = checkpointBaseline;
+        result.hasExplicitBaseline = true;
+    } else {
+        // A legacy journal may already be a compacted synthetic history.
+        // Without an explicit baseline only an equally-new snapshot is safe.
+        result.minimumSnapshotRevision =
+            recovered.commands.back().sequence;
+    }
+    result.ok = true;
+    return result;
+}
+
 } // namespace
 
 JournaledSession::JournaledSession(
@@ -311,35 +398,159 @@ std::unique_ptr<JournaledSession> JournaledSession::open(
         || std::filesystem::exists(
             persistence::projectStagingPath(projectTarget)
         );
+    std::string primaryError;
+    bool primaryLoaded = false;
     if (snapshotExists) {
         const auto loaded =
             persistence::loadProjectSnapshot(projectTarget);
-        if (!loaded.ok) {
-            error = loaded.error;
+        if (loaded.ok) {
+            auto decoded =
+                persistence::deserializeSessionDocument(loaded.payload);
+            if (decoded.ok()) {
+                document = std::move(decoded.document);
+                primaryLoaded = true;
+            } else {
+                primaryError = std::move(decoded.error);
+            }
+        } else {
+            primaryError = loaded.error;
+        }
+    }
+
+    if (primaryLoaded) {
+        const auto durableSnapshotRevision = document.revision;
+        auto session = createFromDocument(
+            std::move(document),
+            journalPathForProject(projectTarget),
+            error
+        );
+        if (session != nullptr) {
+            session->snapshotRevision_ = durableSnapshotRevision;
+            return session;
+        }
+        primaryError = error;
+    }
+
+    const auto backupDirectory =
+        persistence::defaultProjectBackupDirectory(projectTarget);
+    const auto backups =
+        persistence::listProjectBackups(backupDirectory);
+    if (!backups.ok) {
+        error = backups.error;
+        return {};
+    }
+    if (!snapshotExists && backups.entries.empty()) {
+        const auto requirement = inspectJournalForRestore(
+            journalPathForProject(projectTarget)
+        );
+        if (!requirement.ok) {
+            error = "journal-only recovery rejected: "
+                + requirement.error;
             return {};
+        }
+        if (requirement.hasCommands
+            && (!requirement.hasExplicitBaseline
+                || requirement.minimumSnapshotRevision > 1U)) {
+            error =
+                "journal-only recovery requires an explicit default "
+                "session baseline";
+            return {};
+        }
+        SessionController defaults;
+        document = *defaults.snapshot();
+        auto session = createFromDocument(
+            std::move(document),
+            journalPathForProject(projectTarget),
+            error
+        );
+        if (session != nullptr) {
+            session->snapshotRevision_ = 0U;
+        }
+        return session;
+    }
+
+    const auto journalPath = journalPathForProject(projectTarget);
+    const auto requirement =
+        inspectJournalForRestore(journalPath);
+    if (!requirement.ok) {
+        error = "backup restore rejected: " + requirement.error;
+        return {};
+    }
+
+    std::uint64_t skipped = 0U;
+    std::string lastBackupError;
+    for (const auto& entry : backups.entries) {
+        auto loaded = persistence::loadProjectSnapshot(entry.path);
+        if (!loaded.ok) {
+            ++skipped;
+            lastBackupError = std::move(loaded.error);
+            continue;
         }
         auto decoded =
             persistence::deserializeSessionDocument(loaded.payload);
         if (!decoded.ok()) {
-            error = decoded.error;
+            ++skipped;
+            lastBackupError = std::move(decoded.error);
+            continue;
+        }
+        if (decoded.document.revision != entry.revision) {
+            ++skipped;
+            lastBackupError =
+                "backup filename revision does not match session revision";
+            continue;
+        }
+        if (entry.revision
+            < requirement.minimumSnapshotRevision) {
+            ++skipped;
+            lastBackupError =
+                "backup predates the safe journal restore baseline";
+            continue;
+        }
+        if (requirement.maximumSnapshotRevision != 0U
+            && entry.revision
+                > requirement.maximumSnapshotRevision) {
+            ++skipped;
+            lastBackupError =
+                "backup exceeds the final valid journal sequence";
+            continue;
+        }
+
+        std::string candidateError;
+        auto candidate = createFromDocument(
+            std::move(decoded.document),
+            journalPath,
+            candidateError
+        );
+        if (candidate == nullptr) {
+            ++skipped;
+            lastBackupError = std::move(candidateError);
+            continue;
+        }
+        std::string restoreError;
+        if (!persistence::saveProjectSnapshot(
+                projectTarget,
+                loaded.payload,
+                restoreError
+            )) {
+            error = "validated backup could not restore active project: "
+                + restoreError;
             return {};
         }
-        document = std::move(decoded.document);
-    } else {
-        SessionController defaults;
-        document = *defaults.snapshot();
+        candidate->snapshotRevision_ = entry.revision;
+        candidate->recoveredFromBackup_ = true;
+        candidate->recoveredBackupRevision_ = entry.revision;
+        candidate->skippedBackupCount_ = skipped;
+        return candidate;
     }
-    const auto durableSnapshotRevision =
-        snapshotExists ? document.revision : 0U;
-    auto session = createFromDocument(
-        std::move(document),
-        journalPathForProject(projectTarget),
-        error
-    );
-    if (session != nullptr) {
-        session->snapshotRevision_ = durableSnapshotRevision;
+
+    error = snapshotExists
+        ? "active project is unreadable: " + primaryError
+        : "active project is missing";
+    error += "; no safe project backup could be restored";
+    if (!lastBackupError.empty()) {
+        error += ": " + lastBackupError;
     }
-    return session;
+    return {};
 }
 
 std::unique_ptr<JournaledSession>
@@ -349,12 +560,32 @@ JournaledSession::createFromDocument(
     std::string& error
 ) {
     error.clear();
+    const auto documentRevision = document.revision;
     auto controller = SessionController::fromDocument(
         std::move(document),
         error
     );
     if (controller == nullptr) {
         return {};
+    }
+    const auto recovered =
+        persistence::recoverCommandJournal(journalPath);
+    if (!recovered.ok()) {
+        error = recovered.error;
+        return {};
+    }
+    if (recovered.commands.empty()) {
+        const persistence::JournalCommand baseline {
+            .sequence = documentRevision,
+            .payload = encodeCheckpointBaseline(documentRevision),
+        };
+        if (!persistence::rewriteCommandJournal(
+                journalPath,
+                std::span {&baseline, 1U},
+                error
+            )) {
+            return {};
+        }
     }
     try {
         auto session = std::unique_ptr<JournaledSession> {
@@ -403,6 +634,19 @@ bool JournaledSession::requiresReopen() const noexcept {
 
 std::uint64_t JournaledSession::checkpointRevision() const noexcept {
     return checkpointRevision_;
+}
+
+bool JournaledSession::recoveredFromBackup() const noexcept {
+    return recoveredFromBackup_;
+}
+
+std::uint64_t
+JournaledSession::recoveredBackupRevision() const noexcept {
+    return recoveredBackupRevision_;
+}
+
+std::uint64_t JournaledSession::skippedBackupCount() const noexcept {
+    return skippedBackupCount_;
 }
 
 persistence::ImmutableSessionSnapshot
@@ -519,7 +763,7 @@ bool JournaledSession::checkpoint(
         }
 
         const auto recordCount =
-            linearHistory.size() + redo_.size();
+            linearHistory.size() + redo_.size() + 1U;
         if (recordCount
             > static_cast<std::size_t>(durableRevision)) {
             error = "history cannot fit below checkpoint revision";
@@ -529,6 +773,10 @@ bool JournaledSession::checkpoint(
         records.reserve(recordCount);
         std::uint64_t sequence =
             durableRevision - recordCount + 1U;
+        records.push_back({
+            .sequence = sequence++,
+            .payload = encodeCheckpointBaseline(durableRevision),
+        });
         for (const auto& entry : linearHistory) {
             records.push_back({
                 .sequence = sequence++,
@@ -792,10 +1040,12 @@ bool JournaledSession::replay(
         const auto baseRevision = currentRevision();
         for (const auto& record : recovered.commands) {
             std::uint32_t rawAction = 0U;
+            std::uint64_t checkpointBaseline = 0U;
             HistoryEntry entry;
             if (!decodeRecord(
                     record.payload,
                     rawAction,
+                    checkpointBaseline,
                     entry.forward,
                     entry.inverse
                 )) {
@@ -804,6 +1054,21 @@ bool JournaledSession::replay(
             }
             const auto action =
                 static_cast<HistoryAction>(rawAction);
+            if (action == HistoryAction::checkpointBaseline) {
+                if (&record != &recovered.commands.front()
+                    || checkpointBaseline == 0U
+                    || record.sequence > checkpointBaseline
+                    || recovered.commands.back().sequence
+                        < checkpointBaseline
+                    || currentRevision() < checkpointBaseline) {
+                    error =
+                        "session snapshot predates or conflicts with "
+                        "journal checkpoint baseline";
+                    return false;
+                }
+                checkpointRevision_ = checkpointBaseline;
+                continue;
+            }
             if (record.sequence > currentRevision()) {
                 if (record.sequence != currentRevision() + 1U) {
                     error = "session command revision gap";
@@ -862,6 +1127,13 @@ bool JournaledSession::replay(
         }
         if (currentRevision() < baseRevision) {
             error = "session replay moved revision backwards";
+            return false;
+        }
+        if (!recovered.commands.empty()
+            && baseRevision
+                > recovered.commands.back().sequence) {
+            error =
+                "session snapshot exceeds the final journal sequence";
             return false;
         }
         return true;

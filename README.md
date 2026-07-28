@@ -103,6 +103,9 @@ Project-backed session saves now create bounded, revisioned backups from the
 same immutable payload after the active project commits. Rotation,
 corrupt-envelope selection, and failure-isolation evidence is recorded in
 [`docs/phase-0/results/PROJECT_BACKUP_ROTATION_2026-07-28.md`](docs/phase-0/results/PROJECT_BACKUP_ROTATION_2026-07-28.md).
+Fail-closed automatic restore and its journal-baseline compatibility gates are
+recorded in
+[`docs/phase-0/results/AUTOMATIC_BACKUP_RESTORE_2026-07-28.md`](docs/phase-0/results/AUTOMATIC_BACKUP_RESTORE_2026-07-28.md).
 
 See [`docs/adr/0002-skia-renderer.md`](docs/adr/0002-skia-renderer.md) and
 [`docs/architecture/IPC_PROTOCOL.md`](docs/architecture/IPC_PROTOCOL.md) before

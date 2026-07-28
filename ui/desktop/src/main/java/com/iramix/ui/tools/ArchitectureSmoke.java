@@ -115,6 +115,11 @@ public final class ArchitectureSmoke {
                     + ")."
             );
         }
+        Files.writeString(
+            project,
+            "corrupt active project fixture",
+            java.nio.file.StandardOpenOption.TRUNCATE_EXISTING
+        );
         try (var recovered = EngineSession.launch(
             Path.of(engineProbe),
             project,
@@ -138,6 +143,11 @@ public final class ArchitectureSmoke {
                     "Recovered undo revision was not durable."
                 );
             }
+            System.out.println(
+                "Automatic backup restore passed after active-project "
+                    + "corruption (restored_revision=5, "
+                    + "post_restore_revision=6)."
+            );
         } finally {
             var backupDirectory = Path.of(project + ".backups");
             if (Files.isDirectory(backupDirectory)) {

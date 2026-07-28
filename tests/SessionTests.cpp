@@ -1,4 +1,5 @@
 #include "iramix/persistence/ProjectStore.hpp"
+#include "iramix/persistence/ProjectBackupStore.hpp"
 #include "iramix/persistence/SessionDocument.hpp"
 #include "iramix/persistence/SessionPersistenceService.hpp"
 #include "iramix/persistence/SessionSaveCoordinator.hpp"
@@ -10,7 +11,9 @@
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <span>
 #include <string>
 #include <thread>
 #include <vector>
@@ -377,15 +380,16 @@ void testJournaledSession(const std::filesystem::path& root) {
         iramix::persistence::recoverCommandJournal(journal);
     require(journalRecovery.ok(), journalRecovery.error.c_str());
     require(
-        journalRecovery.commands.size() == 10U
-            && journalRecovery.commands.front().sequence == 2U
+        journalRecovery.commands.size() == 11U
+            && journalRecovery.commands.front().sequence == 1U
             && journalRecovery.commands.back().sequence == 11U,
-        "only applied edits and history actions enter the journal"
+        "baseline, applied edits, and history actions enter the journal"
     );
 
     std::cout
         << "Journaled session: snapshot_revision=3, "
-           "replayed_revision=11, durable_records=10, "
+           "replayed_revision=11, baseline_records=1, "
+           "durable_command_records=10, "
            "stale_records=0, undo_depth=2, redo_depth=1, "
            "stable_track_id=2\n";
 }
@@ -483,8 +487,8 @@ void testJournalCheckpointCompaction(
     auto recovered =
         iramix::persistence::recoverCommandJournal(journal);
     require(
-        recovered.ok() && recovered.commands.size() == 8U,
-        "pre-checkpoint journal retains all history actions"
+        recovered.ok() && recovered.commands.size() == 9U,
+        "pre-checkpoint journal retains baseline and history actions"
     );
     require(
         !session->checkpoint(8U, error),
@@ -493,7 +497,7 @@ void testJournalCheckpointCompaction(
     recovered =
         iramix::persistence::recoverCommandJournal(journal);
     require(
-        recovered.ok() && recovered.commands.size() == 8U,
+        recovered.ok() && recovered.commands.size() == 9U,
         "rejected checkpoint leaves original journal authoritative"
     );
 
@@ -516,10 +520,10 @@ void testJournalCheckpointCompaction(
         iramix::persistence::recoverCommandJournal(journal);
     require(
         recovered.ok()
-            && recovered.commands.size() == 2U
-            && recovered.commands.front().sequence == 8U
+            && recovered.commands.size() == 3U
+            && recovered.commands.front().sequence == 7U
             && recovered.commands.back().sequence == 9U,
-        "checkpoint removes dead branches and retains active undo"
+        "checkpoint records baseline and retains active undo"
     );
 
     session.reset();
@@ -544,9 +548,9 @@ void testJournalCheckpointCompaction(
         iramix::persistence::recoverCommandJournal(journal);
     require(
         recovered.ok()
-            && recovered.commands.size() == 3U
+            && recovered.commands.size() == 4U
             && recovered.commands.back().sequence == 10U,
-        "checkpoint retains one redo branch in minimal form"
+        "checkpoint baseline retains one redo branch"
     );
 
     session.reset();
@@ -563,11 +567,254 @@ void testJournalCheckpointCompaction(
 
     std::cout
         << "Journal checkpoint: original_records=8, "
-           "active_undo_records=2, redo_checkpoint_records=3, "
+           "initial_baseline_records=1, "
+           "baseline_records=1, active_undo_records=2, "
+           "redo_checkpoint_records=3, "
            "dead_branch_records_removed=6, stable_revision=10, "
            "original_bytes=" << originalBytes
         << ", compacted_bytes=" << compactedBytes
         << ", checkpoint_ms=" << checkpointMilliseconds << '\n';
+}
+
+void saveBackup(
+    const std::filesystem::path& project,
+    const std::uint64_t filenameRevision,
+    const iramix::persistence::ImmutableSessionSnapshot& snapshot
+) {
+    std::string error;
+    const auto payload =
+        iramix::persistence::serializeSessionDocument(
+            *snapshot,
+            error
+        );
+    require(!payload.empty(), error.c_str());
+    const auto saved = iramix::persistence::saveProjectBackup(
+        {
+            .directory =
+                iramix::persistence::defaultProjectBackupDirectory(
+                    project
+                ),
+            .retainedBackups = 10U,
+        },
+        filenameRevision,
+        payload
+    );
+    require(saved.committed, saved.error.c_str());
+}
+
+void overwriteWithCorruption(
+    const std::filesystem::path& path
+) {
+    std::ofstream output {
+        path,
+        std::ios::binary | std::ios::trunc
+    };
+    output << "not an Iramix project envelope";
+    require(output.good(), "corruption fixture is written");
+}
+
+void testAutomaticBackupRestore(
+    const std::filesystem::path& root
+) {
+    const auto project = root / "automatic-backup-restore.irpx";
+    std::string error;
+    auto session =
+        iramix::session::JournaledSession::open(project, error);
+    require(session != nullptr, error.c_str());
+    require(
+        session->setTempo(1U, 121.0, error).applied(),
+        "restore fixture revision two applies"
+    );
+    const auto revisionTwo = session->snapshot();
+    saveSnapshot(project, revisionTwo);
+    saveBackup(project, 2U, revisionTwo);
+    require(session->checkpoint(2U, error), error.c_str());
+
+    require(
+        session->setTempo(2U, 133.0, error).applied(),
+        "post-checkpoint journal command applies"
+    );
+    const auto revisionThree = session->snapshot();
+    saveBackup(
+        project,
+        4U,
+        revisionThree
+    );
+    const auto backupDirectory =
+        iramix::persistence::defaultProjectBackupDirectory(project);
+    overwriteWithCorruption(
+        iramix::persistence::projectBackupPath(
+            backupDirectory,
+            5U
+        )
+    );
+    overwriteWithCorruption(project);
+    session.reset();
+
+    session =
+        iramix::session::JournaledSession::open(project, error);
+    require(session != nullptr, error.c_str());
+    require(
+        session->recoveredFromBackup()
+            && session->recoveredBackupRevision() == 2U
+            && session->skippedBackupCount() == 2U
+            && session->snapshotRevision() == 2U
+            && session->checkpointRevision() == 2U
+            && session->currentRevision() == 3U
+            && session->snapshot()->tempo == 133.0,
+        "restore skips corrupt and revision-mismatched backups, then "
+        "replays commands newer than the checkpoint baseline"
+    );
+    const auto restoredPrimary =
+        iramix::persistence::loadProjectSnapshot(project);
+    require(restoredPrimary.ok, restoredPrimary.error.c_str());
+    const auto restoredDocument =
+        iramix::persistence::deserializeSessionDocument(
+            restoredPrimary.payload
+        );
+    require(
+        restoredDocument.ok()
+            && restoredDocument.document.revision == 2U,
+        "validated backup atomically restores the active project"
+    );
+
+    const auto stalePrimaryProject =
+        root / "stale-primary-restore.irpx";
+    auto stalePrimary =
+        iramix::session::JournaledSession::open(
+            stalePrimaryProject,
+            error
+        );
+    require(stalePrimary != nullptr, error.c_str());
+    const auto revisionOne = stalePrimary->snapshot();
+    require(
+        stalePrimary->setTempo(1U, 144.0, error).applied(),
+        "stale-primary fixture edit applies"
+    );
+    const auto stalePrimaryRevisionTwo = stalePrimary->snapshot();
+    saveSnapshot(stalePrimaryProject, stalePrimaryRevisionTwo);
+    saveBackup(
+        stalePrimaryProject,
+        2U,
+        stalePrimaryRevisionTwo
+    );
+    require(stalePrimary->checkpoint(2U, error), error.c_str());
+    saveSnapshot(stalePrimaryProject, revisionOne);
+    stalePrimary.reset();
+    stalePrimary =
+        iramix::session::JournaledSession::open(
+            stalePrimaryProject,
+            error
+        );
+    require(stalePrimary != nullptr, error.c_str());
+    require(
+        stalePrimary->recoveredFromBackup()
+            && stalePrimary->recoveredBackupRevision() == 2U
+            && stalePrimary->currentRevision() == 2U
+            && stalePrimary->snapshot()->tempo == 144.0,
+        "schema-valid primary older than checkpoint falls back to backup"
+    );
+
+    const auto journalOnlyProject =
+        root / "journal-only-restore.irpx";
+    auto journalOnly =
+        iramix::session::JournaledSession::open(
+            journalOnlyProject,
+            error
+        );
+    require(journalOnly != nullptr, error.c_str());
+    require(
+        journalOnly->setTempo(1U, 155.0, error).applied(),
+        "journal-only fixture edit applies"
+    );
+    journalOnly.reset();
+    journalOnly =
+        iramix::session::JournaledSession::open(
+            journalOnlyProject,
+            error
+        );
+    require(journalOnly != nullptr, error.c_str());
+    require(
+        !journalOnly->recoveredFromBackup()
+            && journalOnly->currentRevision() == 2U
+            && journalOnly->snapshot()->tempo == 155.0,
+        "explicit default baseline preserves journal-only recovery"
+    );
+
+    const auto legacyProject = root / "legacy-backup-restore.irpx";
+    auto legacy =
+        iramix::session::JournaledSession::open(
+            legacyProject,
+            error
+        );
+    require(legacy != nullptr, error.c_str());
+    require(
+        legacy->setTempo(1U, 140.0, error).applied(),
+        "legacy restore fixture revision two applies"
+    );
+    const auto legacyRevisionTwo = legacy->snapshot();
+    saveBackup(legacyProject, 2U, legacyRevisionTwo);
+    require(
+        legacy->setTempo(2U, 150.0, error).applied(),
+        "legacy restore fixture revision three applies"
+    );
+    const auto legacyRevisionThree = legacy->snapshot();
+    const auto legacyJournal =
+        iramix::session::JournaledSession::journalPathForProject(
+            legacyProject
+        );
+    const auto withBaseline =
+        iramix::persistence::recoverCommandJournal(legacyJournal);
+    require(
+        withBaseline.ok()
+            && withBaseline.commands.size() == 3U,
+        "legacy fixture begins with an explicit baseline"
+    );
+    require(
+        iramix::persistence::rewriteCommandJournal(
+            legacyJournal,
+            std::span<const iramix::persistence::JournalCommand> {
+                withBaseline.commands
+            }.subspan(1U),
+            error
+        ),
+        error.c_str()
+    );
+    legacy.reset();
+
+    legacy =
+        iramix::session::JournaledSession::open(
+            legacyProject,
+            error
+        );
+    require(
+        legacy == nullptr
+            && error.find("safe journal restore baseline")
+                != std::string::npos,
+        "legacy journal rejects a backup older than its last sequence"
+    );
+    saveBackup(legacyProject, 3U, legacyRevisionThree);
+    legacy =
+        iramix::session::JournaledSession::open(
+            legacyProject,
+            error
+        );
+    require(legacy != nullptr, error.c_str());
+    require(
+        legacy->recoveredFromBackup()
+            && legacy->recoveredBackupRevision() == 3U
+            && legacy->currentRevision() == 3U
+            && legacy->snapshot()->tempo == 150.0,
+        "legacy journal accepts an equally-new validated backup"
+    );
+
+    std::cout
+        << "Automatic backup restore: checkpoint_baseline=2, "
+           "backup_revision=2, replayed_revision=3, "
+           "corrupt_backups_skipped=1, revision_mismatches_skipped=1, "
+           "stale_valid_primaries_rejected=1, journal_only_recoveries=1, "
+           "legacy_stale_backups_rejected=1, "
+           "active_project_replacements=3\n";
 }
 
 void testAutosaveScheduler(const std::filesystem::path& root) {
@@ -922,6 +1169,7 @@ int main() {
     testJournaledSession(temporary.path());
     testJournaledEditLatency(temporary.path());
     testJournalCheckpointCompaction(temporary.path());
+    testAutomaticBackupRestore(temporary.path());
     testAutosaveScheduler(temporary.path());
     testSaveCoalescing(temporary.path());
     testRunningCoordinator(temporary.path());

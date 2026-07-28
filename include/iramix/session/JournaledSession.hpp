@@ -84,6 +84,9 @@ public:
     [[nodiscard]] std::size_t redoDepth() const noexcept;
     [[nodiscard]] bool requiresReopen() const noexcept;
     [[nodiscard]] std::uint64_t checkpointRevision() const noexcept;
+    [[nodiscard]] bool recoveredFromBackup() const noexcept;
+    [[nodiscard]] std::uint64_t recoveredBackupRevision() const noexcept;
+    [[nodiscard]] std::uint64_t skippedBackupCount() const noexcept;
 
     [[nodiscard]] persistence::ImmutableSessionSnapshot snapshot() const;
 
@@ -130,6 +133,7 @@ private:
         edit = 1U,
         undo = 2U,
         redo = 3U,
+        checkpointBaseline = 4U,
     };
 
     struct HistoryEntry final {
@@ -168,7 +172,10 @@ private:
     std::vector<HistoryEntry> undo_;
     std::vector<HistoryEntry> redo_;
     std::uint64_t checkpointRevision_ {0U};
+    std::uint64_t recoveredBackupRevision_ {0U};
+    std::uint64_t skippedBackupCount_ {0U};
     bool requiresReopen_ {false};
+    bool recoveredFromBackup_ {false};
 };
 
 } // namespace iramix::session
