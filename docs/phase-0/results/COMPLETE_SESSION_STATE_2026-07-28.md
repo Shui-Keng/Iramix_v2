@@ -1,7 +1,7 @@
 # Complete Session State (Schema v4) — 2026-07-28
 
-Status: P0-012 media/MIDI/device/plugin session state verified locally;
-hosted three-OS CI and sanitizer confirmation pending. Week 6 remains open.
+Status: P0-012 media/MIDI/device/plugin session state verified locally and
+on hosted three-OS CI plus sanitizers; Week 6 remains open.
 
 ## Scope
 
@@ -125,6 +125,31 @@ The full local suite passes:
 Session-side snapshot cost is unchanged in shape
 (`snapshot_p99_ms=0.5797` over 20 iterations at the reference scale).
 
+## CI and sanitizer results
+
+GitHub Actions:
+[`30354240580`](https://github.com/Shui-Keng/Iramix_v2/actions/runs/30354240580)
+
+All five jobs passed on commit `45fb769`:
+
+| Job | Result |
+|---|---|
+| build — windows-2022, `windows-msvc` | passed (6/6 tests, persistence 14.10 s) |
+| build — macos-latest, `dev` | passed |
+| build — ubuntu-latest, `dev` | passed |
+| sanitizers — ASan/UBSan | passed, no diagnostics |
+| sanitizers — TSan | passed, no diagnostics |
+
+Each build job also ran `gradle check`, so the Java UI and engine
+handshake build against schema v4 unchanged.
+
+These hosted jobs validate portability, format behavior, and sanitizer
+coverage for the extended entity set. They are not performance evidence:
+the build matrix runs `ctest` without `--verbose`, so no benchmark output
+is emitted, and the Windows leg builds Debug rather than Release. The v4
+reference timings above remain the only performance figures, and they are
+GCC/UCRT64 Release as noted.
+
 ## Consumer changes
 
 `SessionController` now includes media sources, MIDI sequences, and
@@ -141,8 +166,8 @@ at the declared v4 entity counts.
 
 It does not prove:
 
-- hosted three-OS CI or sanitizer results for schema v4 (not yet run);
 - cold-cache open behavior on declared reference hardware;
+- a same-toolchain performance comparison against the v3 workload;
 - that a real VST3/CLAP plugin restores from a persisted state blob — the
   blob is stored and returned intact, but no plugin has consumed one;
 - that a real media file relinks from a stored path and content hash — no
