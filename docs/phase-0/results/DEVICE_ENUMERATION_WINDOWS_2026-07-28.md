@@ -1,8 +1,8 @@
 # WASAPI Device Enumeration and Session Restore — 2026-07-28
 
 Status: P0-012 device enumeration and session-driven device selection
-verified on Windows hardware; the restored stream opens but the probe
-declines to measure it (see below). Week 6 remains open.
+verified on Windows hardware, with the audio callback measured on the
+restored device. Week 6 remains open.
 
 ## Scope
 
@@ -81,16 +81,31 @@ stored_device="{0.0.0.00000000}.{abb542a8-...}" stored_rate=48000
 stored_buffer=480 status=restored
 resolved_device="{0.0.0.00000000}.{abb542a8-...}" resolved_rate=48000
 resolved_buffer=480 reason=""
-buffer=480 status=unsupported_actual_buffer_size backend=WASAPI_shared
-stream_buffer=1056 period_min=480 period_max=480 period_fundamental=480
+buffer=512 status=measured backend=WASAPI_shared stream_buffer=1126
+period_min=512 period_max=512 period_fundamental=512 callbacks=469
+p50_ms=0.016700 p95_ms=0.021000 p99_ms=0.026300 max_ms=0.050600
+target_misses=0 hard_deadline_misses=0 late_wakeups=0 wait_timeouts=0
+callback_allocations=0 callback_deallocations=0 callback_blocking_locks=0
+graph_blocks=569 hot_swap=completed mmcss=enabled
 ```
 
-The session's stored device was found among eight endpoints, resolved
-exactly (`status=restored`, empty reason), opened by ID, and the audio
-client initialized in shared mode at the session's stored 480-frame
-period. **That is the P0-012 claim, and it holds.**
+The session's stored device was found among the enumerated endpoints,
+resolved exactly (`status=restored`, empty reason), opened by ID,
+initialized in shared mode at the session's stored period, and **the audio
+callback ran on it** for 469 callbacks with zero target misses, zero
+deadline misses, and zero callback allocations or locks.
 
-## Two latent defects this exposed
+Note `buffer=512` is the period and `stream_buffer=1126` the shared-mode
+ring allocation. They are equal only in exclusive mode. The ring adds
+output latency, which this probe does not measure.
+
+(The capture above ran on a later session than the eight-endpoint listing:
+the Bluetooth headset had disconnected, leaving six endpoints and making
+the Realtek speaker the default at a 512-frame period. That the inventory
+changes between runs is the enumeration reading real hardware, not a
+cached list.)
+
+## Three latent defects this exposed
 
 Both live in the probe's shared-mode path, which had never executed on
 this machine: the probe requests 64, 128, and 256 frames, none of which
@@ -115,18 +130,37 @@ The exclusive-mode `IAudioClient::Initialize` call does accept the flag and
 is unchanged. The exclusive path still measures identically
 (`buffer=256 status=measured backend=WASAPI_exclusive stream_buffer=256`).
 
-**2. The buffer-size assertion is exclusive-mode-shaped** — not fixed
-here. After a successful shared-mode init the probe requires
+**2. The buffer-size assertion was exclusive-mode-shaped** — fixed. After
+a successful shared-mode init the probe required
 `GetBufferSize() == requestedFrames`. That holds in exclusive mode, where
-the buffer is the period, but a shared-mode stream returns the ring size
-(1056 for a 480-frame period), so the probe reports
-`unsupported_actual_buffer_size` and declines to measure.
+the buffer is the period, but a shared-mode stream returns the ring size,
+so a correctly configured stream was rejected as
+`unsupported_actual_buffer_size`.
 
-This is left alone deliberately. Correcting it means changing what the
-probe measures per callback in shared mode, which is audio-callback
-measurement semantics and belongs to **P0-008**, not to session
-restoration. Fixing it hastily here would risk publishing latency figures
-whose meaning had quietly changed.
+The requirement is now equality in exclusive mode and "at least one
+period" in shared mode. Nothing else changed: the render loop already
+queried `GetCurrentPadding` and wrote exactly one period per event in
+shared mode, so the cadence the deadline is measured against was already
+correct — only the gate in front of it was wrong.
+
+**3. The deadline target table did not generalize** — fixed.
+`targetNanoseconds()` was a lookup over 64, 128, and 256 frames and
+returned **0** for anything else, so every callback at a device's native
+period counted as a target miss. The first restored run reported
+`target_misses=469` out of 469 callbacks while p99 processing was
+0.0276 ms against a 10.67 ms period — an artifact of the table, not a
+deadline failure.
+
+`PERFORMANCE_BUDGETS.md` states the engine target reserves 30% of the
+callback deadline for the operating system, and the three tabulated values
+are 70% of their periods to within rounding. The lookup now falls back to
+exactly that 70% rule for any other period. The three documented
+configurations keep their tabulated values unchanged, so results already
+recorded against them stay comparable.
+
+The exclusive path is unaffected by either fix and still measures
+identically (`buffer=256 status=measured backend=WASAPI_exclusive
+stream_buffer=256`).
 
 ## CI and sanitizer results
 
@@ -164,9 +198,12 @@ resolver's output is directly openable.
 
 It does not prove:
 
-- **that audio was rendered through the restored device.** The stream
-  initialized; the probe then declined to measure it for the reason above.
-  No callback ran on the restored configuration;
+- **that the restored stream was listened to.** The callback ran and met
+  its deadline, but the workload is the synthetic graph the probe always
+  renders; nothing verifies the samples reaching the endpoint are the
+  session's audio, because no clip playback path exists yet;
+- shared-mode output latency, which the ring allocation dominates and this
+  probe does not measure;
 - any macOS or Linux enumeration — both report `supported=false`, and
   neither can be implemented or tested here (R-13);
 - enumeration behavior on device hot-plug, device loss, or exclusive-mode

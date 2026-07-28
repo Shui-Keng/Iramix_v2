@@ -558,6 +558,13 @@ void requireSuccess(const HRESULT result, const char* operation) {
     return format;
 }
 
+// PERFORMANCE_BUDGETS.md reserves 30% of the callback deadline for the
+// operating system, so the engine target is 70% of the period. The three
+// documented configurations keep their tabulated values exactly, so results
+// recorded against them stay comparable. Any other period — a device's
+// native period selected by session restoration, for instance — uses the
+// same 70% rule. Returning 0 for those, as this did before, made every
+// callback count as a target miss.
 [[nodiscard]] std::uint64_t targetNanoseconds(
     const std::uint32_t frames
 ) {
@@ -569,8 +576,15 @@ void requireSuccess(const HRESULT result, const char* operation) {
     case 256U:
         return 3'730'000U;
     default:
+        break;
+    }
+    if (frames == 0U) {
         return 0U;
     }
+    const auto periodNanoseconds =
+        static_cast<std::uint64_t>(frames) * 1'000'000'000ULL
+        / kSampleRate;
+    return periodNanoseconds * 7ULL / 10ULL;
 }
 
 [[nodiscard]] std::uint64_t percentile(
@@ -1000,7 +1014,18 @@ ProbeResult runConfiguration(
         client->GetBufferSize(&result.streamBufferFrames),
         "IAudioClient::GetBufferSize"
     );
-    if (result.streamBufferFrames != requestedFrames) {
+    // Exclusive mode allocates exactly one period, so a stream buffer that
+    // differs means the request was not honored. A shared-mode stream
+    // allocates a ring of several periods instead, and requiring equality
+    // there rejects a correctly configured stream. What the deadline is
+    // measured against is the period in both modes, and the loop below
+    // writes exactly one period per event either way; the ring only adds
+    // output latency, which this probe does not measure. `buffer=` in the
+    // result line is the period, `stream_buffer=` the allocation.
+    const auto bufferHonored = exclusive
+        ? result.streamBufferFrames == requestedFrames
+        : result.streamBufferFrames >= requestedFrames;
+    if (!bufferHonored) {
         result.status = "unsupported_actual_buffer_size";
         return result;
     }

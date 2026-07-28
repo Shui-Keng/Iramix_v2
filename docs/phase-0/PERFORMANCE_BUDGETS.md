@@ -16,6 +16,11 @@ At 48 kHz:
 The engine p99 target reserves 30% of the callback deadline for operating
 system jitter and safety margin.
 
+The table lists the three configurations Phase 0 measures deliberately, but
+the 70% rule applies to any period. A device whose native period is not one
+of these — selected by session device restoration, for example — is held to
+the same 70% target computed from its own period, not exempted from one.
+
 Additional gates:
 
 - zero heap allocations in the callback after startup;
