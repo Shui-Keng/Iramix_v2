@@ -144,7 +144,7 @@ behavioural surprise.
 | Production storage | SQLite plus schema layer | Session persistence | Open |
 | Windows audio | Steinberg ASIO SDK 2.3 | Optional external probe | Proprietary selected; signing pending |
 | Plugin API | CLAP | Plugin hosting | Planned; MIT upstream, to be confirmed on adoption |
-| Plugin API | VST3 SDK | Plugin hosting | Planned. **Dual GPLv3 / proprietary Steinberg licence — the same shape as ASIO. The closed-source path requires the proprietary agreement.** |
+| Plugin API | VST3 SDK 3.8 or later | Plugin hosting | Planned; **MIT since VST 3.8 (2025-10-29)**. No agreement required, no disclosure obligation. Pin ≥ 3.8 — earlier releases are dual GPLv3/proprietary |
 | Plugin API | Apple Audio Unit | macOS plugin hosting | Planned; Apple SDK terms |
 
 ### Resolved since the previous revision
@@ -169,6 +169,30 @@ behavioural surprise.
   **vulnerability inventory is not yet automated.**
 - Updating Skiko/Skia or a plugin SDK requires compatibility tests, not
   only a successful build.
+
+## VST3 licence record
+
+- Steinberg released the **VST 3.8 SDK under the MIT licence on
+  2025-10-29**, replacing the previous dual GPLv3/proprietary model. MIT
+  permits use in a closed-source commercial product provided the copyright
+  and licence text are retained, so **no developer agreement and no source
+  disclosure is required** — unlike ASIO.
+- This removes what was previously recorded here as a blocking decision
+  for VST3 plugin hosting. That entry was stale: it described the terms
+  before 3.8.
+- **The version matters.** Releases before 3.8 remain under the old dual
+  model, so the dependency must be pinned to 3.8 or later. Adopting an
+  older tag would silently reintroduce the GPLv3 obligation.
+- Evidence is Steinberg's press release of 2025-10-29 ("VST 3 Now
+  Available Under MIT License"). The press release is the announcement,
+  not the licence: **confirm against `LICENSE.txt` in the SDK checkout on
+  adoption**, and record the SDK version and licence hash in this document
+  at that point.
+- The VST name and logo are trademarks governed separately from the SDK
+  licence, exactly as with ASIO. The same default policy applies: protocol
+  support without branding until branding is deliberately approved.
+- Primary reference: Steinberg press release, "VST 3 Now Available Under
+  MIT License", 2025-10-29.
 
 ## ASIO SDK spike record
 
