@@ -1,7 +1,7 @@
 # Revisioned Project Backup Rotation — 2026-07-28
 
-Status: local Windows MSVC/GCC and Java 21 integration verification passed.
-Hosted three-OS and sanitizer verification is pending. P0-012 remains open.
+Status: local Windows MSVC/GCC plus hosted three-OS, Java 21, and sanitizer
+verification passed. P0-012 remains open.
 
 ## Scope
 
@@ -97,15 +97,31 @@ These are raw timings from one Debug run and are not performance claims.
 - `git diff --check` passed; line-ending notices are repository checkout
   behavior, not whitespace errors.
 
+## Hosted verification
+
+Source commit:
+`e18de81400efeec91e5c9a963fe2b3dede698e13`
+
+GitHub Actions:
+[`30349561583`](https://github.com/Shui-Keng/Iramix_v2/actions/runs/30349561583)
+
+- Windows Server 2022: all six CTest targets and Java 21 architecture/load
+  smoke passed.
+- macOS hosted runner: all six CTest targets and Java 21 architecture/load
+  smoke passed.
+- Ubuntu hosted runner: all six CTest targets and Java 21 architecture/load
+  smoke passed.
+- ASan/UBSan: all six CTest targets passed without diagnostics.
+- TSan: all six CTest targets passed without diagnostics.
+
 ## Evidence boundary
 
 This proves backup creation ordering, bounded revision retention, unknown-file
 preservation, corrupt-envelope skipping, and primary/backup failure isolation
 in local synthetic tests.
 
-It does not yet prove:
+It does not prove:
 
-- hosted Windows, macOS, Linux, ASan/UBSan, or TSan portability;
 - automatic restoration of the active project from a backup;
 - session-schema and embedded-revision validation during restore;
 - physical power-loss behavior during backup commit or pruning;

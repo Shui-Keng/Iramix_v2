@@ -70,7 +70,8 @@ that slice is green. Revisioned backup creation, bounded retention,
 unknown-file preservation, corrupt-envelope skipping, and primary/backup
 failure isolation now have local evidence in
 [`PROJECT_BACKUP_ROTATION_2026-07-28.md`](results/PROJECT_BACKUP_ROTATION_2026-07-28.md).
-R-06 remains open for hosted confirmation of that slice, automatic restore,
-complete state, cold storage, and physical power-loss evidence. The first
+The backup slice is also green on hosted Windows, macOS, Linux, ASan/UBSan,
+and TSan. R-06 remains open for automatic restore, complete state, cold
+storage, and physical power-loss evidence. The first
 durable-command latency p99 also missed the provisional 10 ms control target,
 so performance optimization must not be treated as complete.
