@@ -40,6 +40,26 @@ constexpr std::uint32_t kStateRequestCapture = 2U;
 constexpr std::uint32_t kStateResultOk = 0U;
 constexpr std::uint32_t kStateResultRejected = 1U;
 
+constexpr std::uint32_t kMaximumParameterQueueCapacity = 4'096U;
+
+// One control-thread-to-plugin parameter change. Plain fixed-width members
+// only: the host writes these, the child reads them, and publication is the
+// release store on the write index rather than anything in the record.
+struct SharedParameterEvent final {
+    std::uint64_t sampleTime;
+    std::uint32_t parameterId;
+    float value;
+};
+
+[[nodiscard]] std::uint32_t roundUpToPowerOfTwo(std::uint32_t value)
+    noexcept {
+    std::uint32_t result = 1U;
+    while (result < value) {
+        result <<= 1U;
+    }
+    return result;
+}
+
 // Laid out for cross-process sharing: fixed-width, lock-free atomics only,
 // no pointers, no virtuals. Both processes map the same bytes.
 struct SharedControl final {
@@ -61,21 +81,42 @@ struct SharedControl final {
     std::atomic<std::uint32_t> stateSequence;
     std::atomic<std::uint32_t> stateCompletion;
     std::atomic<std::uint32_t> stateResult;
+    // Single-producer/single-consumer parameter ring. The host's control
+    // thread is the only writer, the plugin process the only reader, and
+    // the audio thread touches neither index.
+    std::atomic<std::uint32_t> parameterCapacity;
+    std::atomic<std::uint32_t> parameterWrite;
+    std::atomic<std::uint32_t> parameterRead;
+    std::atomic<std::uint64_t> blockStartSample;
+    std::atomic<std::uint64_t> parametersApplied;
+    std::atomic<std::uint64_t> parametersLate;
 };
 
 static_assert(
-    std::atomic<std::uint32_t>::is_always_lock_free,
+    std::atomic<std::uint32_t>::is_always_lock_free
+        && std::atomic<std::uint64_t>::is_always_lock_free,
     "cross-process control block requires lock-free atomics"
+);
+
+// The parameter ring is placed directly after the audio area, so its
+// alignment depends on both being whole multiples of the event alignment.
+static_assert(
+    sizeof(SharedControl) % alignof(SharedParameterEvent) == 0U
+        && (sizeof(float) * 2U) % alignof(SharedParameterEvent) == 0U,
+    "parameter events must land aligned in the shared region"
 );
 
 [[nodiscard]] std::size_t regionBytes(
     const std::uint32_t maximumFrames,
     const std::uint32_t channelCount,
-    const std::uint32_t maximumStateBytes
+    const std::uint32_t maximumStateBytes,
+    const std::uint32_t parameterCapacity
 ) noexcept {
     const auto samples = static_cast<std::size_t>(maximumFrames)
         * static_cast<std::size_t>(channelCount);
     return sizeof(SharedControl) + samples * sizeof(float) * 2U
+        + static_cast<std::size_t>(parameterCapacity)
+            * sizeof(SharedParameterEvent)
         + static_cast<std::size_t>(maximumStateBytes);
 }
 
@@ -92,11 +133,23 @@ static_assert(
     return inputBase(control) + samples;
 }
 
-[[nodiscard]] std::byte* stateBase(
+[[nodiscard]] SharedParameterEvent* parameterBase(
     SharedControl* const control,
     const std::size_t samples
 ) noexcept {
-    return reinterpret_cast<std::byte*>(outputBase(control, samples) + samples);
+    return reinterpret_cast<SharedParameterEvent*>(
+        outputBase(control, samples) + samples
+    );
+}
+
+[[nodiscard]] std::byte* stateBase(
+    SharedControl* const control,
+    const std::size_t samples,
+    const std::uint32_t parameterCapacity
+) noexcept {
+    return reinterpret_cast<std::byte*>(
+        parameterBase(control, samples) + parameterCapacity
+    );
 }
 
 // macOS caps POSIX shared-memory and semaphore names at 31 characters
@@ -236,6 +289,12 @@ struct PluginBridge::Impl final {
     std::size_t mappedBytes {0U};
     PluginBridgeCounters counters {};
     bool started {false};
+    std::uint32_t parameterCapacity {0U};
+    std::uint64_t samplePosition {0U};
+    // Mirrors the newest queued timestamp so an out-of-order enqueue can be
+    // refused without reading an index the plugin process also writes.
+    std::uint64_t lastParameterTime {0U};
+    bool hasParameterTime {false};
 
 #if defined(_WIN32)
     HANDLE mapping {nullptr};
@@ -320,9 +379,9 @@ struct PluginBridge::Impl final {
     // host's timer granularity instead — on Windows that is ~15 ms, which
     // is three orders of magnitude above the actual transfer.
     [[nodiscard]] bool awaitState(const std::uint32_t sequence) noexcept {
-        const auto started = std::chrono::steady_clock::now();
-        const auto expiry = started + config.stateDeadline;
-        const auto spinUntil = started + std::chrono::microseconds {500};
+        const auto beganAt = std::chrono::steady_clock::now();
+        const auto expiry = beganAt + config.stateDeadline;
+        const auto spinUntil = beganAt + std::chrono::microseconds {500};
         while (control->stateCompletion.load(std::memory_order_acquire)
             != sequence) {
             const auto now = std::chrono::steady_clock::now();
@@ -358,7 +417,9 @@ std::unique_ptr<PluginBridge> PluginBridge::create(
         || config.deadline <= std::chrono::microseconds::zero()
         || config.maximumStateBytes > kMaximumStateBytes
         || (config.maximumStateBytes > 0U
-            && config.stateDeadline <= std::chrono::milliseconds::zero())) {
+            && config.stateDeadline <= std::chrono::milliseconds::zero())
+        || config.parameterQueueCapacity
+            > kMaximumParameterQueueCapacity) {
         error = "plugin bridge configuration is out of range";
         return {};
     }
@@ -371,11 +432,18 @@ std::unique_ptr<PluginBridge> PluginBridge::create(
         return {};
     }
     impl->config = config;
+    // A power-of-two depth lets the ring mask instead of divide, which is
+    // what keeps the enqueue free of anything the control thread must not
+    // do while audio runs.
+    impl->parameterCapacity = config.parameterQueueCapacity == 0U
+        ? 0U
+        : roundUpToPowerOfTwo(config.parameterQueueCapacity);
 
     const auto bytes = regionBytes(
         config.maximumFrames,
         config.channelCount,
-        config.maximumStateBytes
+        config.maximumStateBytes,
+        impl->parameterCapacity
     );
     impl->mappedBytes = bytes;
 
@@ -478,6 +546,10 @@ std::unique_ptr<PluginBridge> PluginBridge::create(
     );
     impl->control->maximumStateBytes.store(
         config.maximumStateBytes,
+        std::memory_order_relaxed
+    );
+    impl->control->parameterCapacity.store(
+        impl->parameterCapacity,
         std::memory_order_relaxed
     );
 #if defined(_WIN32)
@@ -625,7 +697,68 @@ std::string PluginBridge::sharedMemoryName() const {
 }
 
 PluginBridgeCounters PluginBridge::counters() const noexcept {
-    return impl_->counters;
+    auto snapshot = impl_->counters;
+    // The applied and late counts are the plugin's own tally, read out of
+    // the shared region rather than inferred host-side. The host cannot
+    // know when the plugin actually acted on an event.
+    if (impl_->control != nullptr) {
+        snapshot.parametersApplied =
+            impl_->control->parametersApplied.load(
+                std::memory_order_relaxed
+            );
+        snapshot.parametersLate =
+            impl_->control->parametersLate.load(std::memory_order_relaxed);
+    }
+    return snapshot;
+}
+
+std::uint64_t PluginBridge::samplePosition() const noexcept {
+    return impl_->samplePosition;
+}
+
+PluginParameterStatus PluginBridge::setParameter(
+    const PluginParameterId parameter,
+    const float value,
+    const std::uint64_t sampleTime
+) noexcept {
+    if (!impl_->started
+        || impl_->control == nullptr
+        || impl_->parameterCapacity == 0U) {
+        return PluginParameterStatus::unavailable;
+    }
+    // Refused rather than reordered: if two changes to the same parameter
+    // could be applied in either order, the rendered result stops being
+    // reproducible from the session.
+    if (impl_->hasParameterTime && sampleTime < impl_->lastParameterTime) {
+        ++impl_->counters.parameterOutOfOrder;
+        return PluginParameterStatus::outOfOrder;
+    }
+
+    auto* const control = impl_->control;
+    const auto write =
+        control->parameterWrite.load(std::memory_order_relaxed);
+    const auto read = control->parameterRead.load(std::memory_order_acquire);
+    if (write - read >= impl_->parameterCapacity) {
+        // Saturation is reported to the caller. A bounded queue that
+        // silently overwrites its oldest entry would lose an automation
+        // move with no trace of having done so.
+        ++impl_->counters.parameterOverflows;
+        return PluginParameterStatus::queueFull;
+    }
+
+    auto* const slot = parameterBase(control, impl_->sampleCount())
+        + (write & (impl_->parameterCapacity - 1U));
+    slot->sampleTime = sampleTime;
+    slot->parameterId = static_cast<std::uint32_t>(parameter);
+    slot->value = value;
+    // Publishes the record above: the child acquires this index before it
+    // reads the slot.
+    control->parameterWrite.store(write + 1U, std::memory_order_release);
+
+    impl_->lastParameterTime = sampleTime;
+    impl_->hasParameterTime = true;
+    ++impl_->counters.parametersSent;
+    return PluginParameterStatus::accepted;
 }
 
 PluginStateStatus PluginBridge::restoreState(
@@ -645,7 +778,11 @@ PluginStateStatus PluginBridge::restoreState(
     auto* const control = impl_->control;
     if (!state.empty()) {
         std::memcpy(
-            stateBase(control, impl_->sampleCount()),
+            stateBase(
+                control,
+                impl_->sampleCount(),
+                impl_->parameterCapacity
+            ),
             state.data(),
             state.size()
         );
@@ -721,7 +858,11 @@ PluginStateStatus PluginBridge::captureState(
     if (produced != 0U) {
         std::memcpy(
             state.data(),
-            stateBase(control, impl_->sampleCount()),
+            stateBase(
+                control,
+                impl_->sampleCount(),
+                impl_->parameterCapacity
+            ),
             produced
         );
     }
@@ -763,6 +904,15 @@ PluginBlockStatus PluginBridge::processBlock(
         samples * sizeof(float)
     );
     control->frameCount.store(frameCount, std::memory_order_relaxed);
+    // Published before the request sequence, so the child sees the window
+    // it must schedule parameter events against.
+    control->blockStartSample.store(
+        impl_->samplePosition,
+        std::memory_order_relaxed
+    );
+    // Transport advances even when the plugin misses: a stalled plugin
+    // must not rewind the timeline the rest of the session is on.
+    impl_->samplePosition += frameCount;
     const auto sequence =
         control->requestSequence.load(std::memory_order_relaxed) + 1U;
     control->requestSequence.store(sequence, std::memory_order_release);
@@ -833,7 +983,8 @@ int PluginBridge::runChild(
     bytes = regionBytes(
         header->maximumFrames.load(std::memory_order_relaxed),
         header->channelCount.load(std::memory_order_relaxed),
-        header->maximumStateBytes.load(std::memory_order_relaxed)
+        header->maximumStateBytes.load(std::memory_order_relaxed),
+        header->parameterCapacity.load(std::memory_order_relaxed)
     );
     UnmapViewOfFile(header);
     control = static_cast<SharedControl*>(
@@ -884,7 +1035,8 @@ int PluginBridge::runChild(
     bytes = regionBytes(
         header->maximumFrames.load(std::memory_order_relaxed),
         header->channelCount.load(std::memory_order_relaxed),
-        header->maximumStateBytes.load(std::memory_order_relaxed)
+        header->maximumStateBytes.load(std::memory_order_relaxed),
+        header->parameterCapacity.load(std::memory_order_relaxed)
     );
     ::munmap(header, sizeof(SharedControl));
     void* const mapped = ::mmap(
@@ -917,10 +1069,13 @@ int PluginBridge::runChild(
     const auto stateCapacity = static_cast<std::size_t>(
         control->maximumStateBytes.load(std::memory_order_relaxed)
     );
+    const auto parameterCapacity =
+        control->parameterCapacity.load(std::memory_order_relaxed);
 
     // Live state of the stand-in plugin. The default stands in for a
     // freshly instantiated plugin that has never been given a blob.
     float gain = 0.5F;
+    bool bypassed = false;
     std::vector<std::byte> payload;
 
     control->childReady.store(1U, std::memory_order_release);
@@ -983,10 +1138,11 @@ int PluginBridge::runChild(
             control->stateSequence.load(std::memory_order_acquire);
         if (stateSequence != lastStateSequence && stateCapacity != 0U) {
             lastStateSequence = stateSequence;
-            std::byte* const blob = stateBase(control, capacity);
-            const auto request =
+            std::byte* const blob =
+                stateBase(control, capacity, parameterCapacity);
+            const auto stateKind =
                 control->stateRequest.load(std::memory_order_relaxed);
-            if (request == kStateRequestRestore) {
+            if (stateKind == kStateRequestRestore) {
                 const auto length = std::min(
                     static_cast<std::size_t>(
                         control->stateBytes.load(std::memory_order_relaxed)
@@ -1015,7 +1171,7 @@ int PluginBridge::runChild(
                         std::memory_order_relaxed
                     );
                 }
-            } else if (request == kStateRequestCapture) {
+            } else if (stateKind == kStateRequestCapture) {
                 const auto produced = stub::encodeState(gain, payload);
                 if (produced.size() <= stateCapacity) {
                     std::memcpy(blob, produced.data(), produced.size());
@@ -1072,15 +1228,79 @@ int PluginBridge::runChild(
                 * static_cast<std::size_t>(channelCount),
             capacity
         );
+
+        // Parameter events are drained before the block is rendered, and
+        // only up to the end of the block's own window. An event scheduled
+        // for a later block stays queued rather than being applied early,
+        // which is what makes the rendered result a function of the
+        // timeline instead of of delivery timing.
+        if (parameterCapacity != 0U) {
+            const auto blockStart =
+                control->blockStartSample.load(std::memory_order_relaxed);
+            const auto blockEnd = blockStart + frames;
+            auto* const events = parameterBase(control, capacity);
+            auto readIndex =
+                control->parameterRead.load(std::memory_order_relaxed);
+            const auto writeIndex =
+                control->parameterWrite.load(std::memory_order_acquire);
+            std::uint64_t applied = 0U;
+            std::uint64_t late = 0U;
+            while (readIndex != writeIndex) {
+                const auto& event =
+                    events[readIndex & (parameterCapacity - 1U)];
+                if (event.sampleTime >= blockEnd) {
+                    break;
+                }
+                // Counted, not hidden: an event that should already have
+                // been rendered is a scheduling failure upstream, and the
+                // alternative — discarding it — would silently lose an
+                // automation move.
+                if (event.sampleTime < blockStart) {
+                    ++late;
+                }
+                if (event.parameterId
+                    == static_cast<std::uint32_t>(
+                        PluginParameterId::gain
+                    )) {
+                    gain = event.value;
+                } else if (event.parameterId
+                    == static_cast<std::uint32_t>(
+                        PluginParameterId::bypass
+                    )) {
+                    bypassed = event.value != 0.0F;
+                }
+                ++applied;
+                ++readIndex;
+            }
+            if (applied != 0U) {
+                control->parameterRead.store(
+                    readIndex,
+                    std::memory_order_release
+                );
+                control->parametersApplied.fetch_add(
+                    applied,
+                    std::memory_order_relaxed
+                );
+                if (late != 0U) {
+                    control->parametersLate.fetch_add(
+                        late,
+                        std::memory_order_relaxed
+                    );
+                }
+            }
+        }
         const float* const source = inputBase(control);
         float* const destination = outputBase(control, capacity);
         for (std::size_t index = 0U; index < samples; ++index) {
             // Stand-in for plugin DSP: a deterministic, verifiable
             // transform so a test can prove the audio round-tripped
             // through the other process rather than being zeroed. The
-            // coefficient comes from restored state, so the same assertion
-            // also proves a restored blob reached the DSP.
-            destination[index] = source[index] * gain;
+            // coefficient comes from restored state and from parameter
+            // events, so the same assertion also proves a restored blob or
+            // a queued change reached the DSP.
+            destination[index] = bypassed
+                ? source[index]
+                : source[index] * gain;
         }
         ++handled;
         control->completionSequence.store(

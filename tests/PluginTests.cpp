@@ -40,6 +40,7 @@ constexpr std::uint32_t kChannels = 2U;
 constexpr std::size_t kSamples =
     static_cast<std::size_t>(kFrames) * kChannels;
 constexpr std::uint32_t kStateCapacity = 65'536U;
+constexpr std::uint32_t kParameterQueueCapacity = 64U;
 
 [[nodiscard]] iramix::plugin::PluginBridgeConfig makeConfig() {
     return {
@@ -48,6 +49,7 @@ constexpr std::uint32_t kStateCapacity = 65'536U;
         .deadline = std::chrono::milliseconds {5},
         .maximumStateBytes = kStateCapacity,
         .stateDeadline = std::chrono::milliseconds {250},
+        .parameterQueueCapacity = kParameterQueueCapacity,
     };
 }
 
@@ -541,6 +543,7 @@ void testPluginStateRejections(const std::filesystem::path& self) {
             .deadline = std::chrono::milliseconds {5},
             .maximumStateBytes = 0U,
             .stateDeadline = std::chrono::milliseconds {250},
+            .parameterQueueCapacity = 0U,
         },
         error
     );
@@ -667,6 +670,205 @@ void testPluginStateOnDeadPlugin(const std::filesystem::path& self) {
         << ", captured_bytes=0\n";
 }
 
+void testParameterTransport(const std::filesystem::path& self) {
+    namespace plugin = iramix::plugin;
+    std::string error;
+    auto bridge = plugin::PluginBridge::create(makeConfig(), error);
+    require(bridge != nullptr, error.c_str());
+    require(bridge->start(self, "normal", error), error.c_str());
+
+    const auto input = makeInput();
+    std::vector<float> output(kSamples, -1.0F);
+    require(
+        warmUp(*bridge, input, output),
+        "the plugin process services a block"
+    );
+
+    // Scheduled for the block *after* the next one, so "applied at the
+    // right time" and "applied at all" cannot be confused.
+    const auto scheduledAt = bridge->samplePosition() + kFrames;
+    require(
+        bridge->setParameter(
+            plugin::PluginParameterId::gain,
+            0.2F,
+            scheduledAt
+        ) == plugin::PluginParameterStatus::accepted,
+        "a parameter change is accepted while audio is running"
+    );
+
+    std::fill(output.begin(), output.end(), -1.0F);
+    require(
+        bridge->processBlock(input, output, kFrames)
+            == plugin::PluginBlockStatus::processed
+            && outputMatchesGain(input, output, 0.5F),
+        "an event scheduled for a later block is not applied early"
+    );
+
+    std::fill(output.begin(), output.end(), -1.0F);
+    require(
+        bridge->processBlock(input, output, kFrames)
+            == plugin::PluginBlockStatus::processed
+            && outputMatchesGain(input, output, 0.2F),
+        "the event lands on the block it was scheduled for"
+    );
+
+    // Bypass is a distinct parameter with distinct audible behaviour, so a
+    // single stuck coefficient cannot satisfy both assertions.
+    require(
+        bridge->setParameter(
+            plugin::PluginParameterId::bypass,
+            1.0F,
+            bridge->samplePosition()
+        ) == plugin::PluginParameterStatus::accepted,
+        "bypass is accepted"
+    );
+    std::fill(output.begin(), output.end(), -1.0F);
+    require(
+        bridge->processBlock(input, output, kFrames)
+            == plugin::PluginBlockStatus::processed
+            && outputMatchesGain(input, output, 1.0F),
+        "a bypassed plugin passes audio through untouched"
+    );
+
+    // The loop that matters: a change made through the control transport
+    // is what a subsequent save would persist.
+    std::vector<std::byte> captured;
+    require(
+        bridge->captureState(captured) == plugin::PluginStateStatus::ok,
+        "state can be captured after a parameter change"
+    );
+    float capturedGain = 0.0F;
+    require(
+        plugin::stub::decodeStateGain(captured, capturedGain)
+            && std::abs(capturedGain - 0.2F) < 1e-6F,
+        "captured state carries the value set through the transport"
+    );
+
+    // Bypass is a host-side field on SessionPlugin, so the plugin must not
+    // smuggle it into the blob and claim ownership of it.
+    require(
+        captured == plugin::stub::encodeState(0.2F, {}),
+        "bypass is not carried in the plugin's state blob"
+    );
+
+    const auto counters = bridge->counters();
+    bridge->stop();
+    require(
+        counters.parametersSent == 2U
+            && counters.parametersApplied == 2U
+            && counters.parametersLate == 0U
+            && counters.parameterOverflows == 0U,
+        "every queued event is applied exactly once and on time"
+    );
+
+    std::cout
+        << "Plugin parameter transport: queue_capacity="
+        << kParameterQueueCapacity
+        << ", sent=" << counters.parametersSent
+        << ", applied=" << counters.parametersApplied
+        << ", late=" << counters.parametersLate
+        << ", early_application=0, bypass_observed=1"
+        << ", capture_reflects_transport=1\n";
+}
+
+void testParameterLateAndSaturation(const std::filesystem::path& self) {
+    namespace plugin = iramix::plugin;
+    std::string error;
+
+    // A late event is applied and counted, never discarded: dropping it
+    // would silently lose an automation move.
+    auto late = plugin::PluginBridge::create(makeConfig(), error);
+    require(late != nullptr, error.c_str());
+    require(late->start(self, "normal", error), error.c_str());
+    const auto input = makeInput();
+    std::vector<float> output(kSamples, -1.0F);
+    require(warmUp(*late, input, output), "the plugin services a block");
+    require(
+        late->samplePosition() > 0U,
+        "the bridge advanced the transport while warming up"
+    );
+    require(
+        late->setParameter(plugin::PluginParameterId::gain, 0.125F, 0U)
+            == plugin::PluginParameterStatus::accepted,
+        "an event whose time has passed is still accepted"
+    );
+    std::fill(output.begin(), output.end(), -1.0F);
+    require(
+        late->processBlock(input, output, kFrames)
+            == plugin::PluginBlockStatus::processed
+            && outputMatchesGain(input, output, 0.125F),
+        "a late event is applied rather than dropped"
+    );
+    const auto lateCounters = late->counters();
+    require(
+        lateCounters.parametersApplied == 1U
+            && lateCounters.parametersLate == 1U,
+        "lateness is counted, not hidden"
+    );
+    late->stop();
+
+    // Saturation. No block is processed, so the plugin never drains the
+    // queue and the host must refuse rather than overwrite.
+    auto full = plugin::PluginBridge::create(makeConfig(), error);
+    require(full != nullptr, error.c_str());
+    require(full->start(self, "normal", error), error.c_str());
+    std::size_t accepted = 0U;
+    std::size_t refused = 0U;
+    for (std::uint32_t index = 0U;
+        index < kParameterQueueCapacity + 8U;
+        ++index) {
+        const auto status = full->setParameter(
+            plugin::PluginParameterId::gain,
+            0.5F,
+            static_cast<std::uint64_t>(index)
+        );
+        if (status == plugin::PluginParameterStatus::accepted) {
+            ++accepted;
+        } else {
+            require(
+                status == plugin::PluginParameterStatus::queueFull,
+                "a saturated queue reports queueFull"
+            );
+            ++refused;
+        }
+    }
+    require(
+        accepted == kParameterQueueCapacity && refused == 8U,
+        "the queue accepts exactly its capacity and refuses the rest"
+    );
+
+    // Out-of-order delivery would make the rendered result depend on when
+    // events arrived rather than on the timeline.
+    require(
+        full->setParameter(plugin::PluginParameterId::gain, 0.5F, 0U)
+            == plugin::PluginParameterStatus::outOfOrder,
+        "an event that goes backwards in time is refused"
+    );
+
+    const auto counters = full->counters();
+    full->stop();
+    require(
+        full->setParameter(plugin::PluginParameterId::gain, 0.5F, 1'000U)
+            == plugin::PluginParameterStatus::unavailable,
+        "parameters after stop are refused"
+    );
+    require(
+        counters.parameterOverflows == 8U
+            && counters.parameterOutOfOrder == 1U,
+        "refusals are counted separately by cause"
+    );
+
+    std::cout
+        << "Plugin parameter limits: late_applied="
+        << lateCounters.parametersLate
+        << ", late_dropped=0"
+        << ", queue_capacity=" << kParameterQueueCapacity
+        << ", accepted=" << accepted
+        << ", overflows=" << counters.parameterOverflows
+        << ", out_of_order=" << counters.parameterOutOfOrder
+        << ", after_stop=1\n";
+}
+
 } // namespace
 
 int main(const int argc, char* argv[]) {
@@ -683,6 +885,8 @@ int main(const int argc, char* argv[]) {
     testPluginStateRestoration(self);
     testPluginStateRejections(self);
     testPluginStateOnDeadPlugin(self);
+    testParameterTransport(self);
+    testParameterLateAndSaturation(self);
     std::cout << "All Iramix plugin tests passed.\n";
     return EXIT_SUCCESS;
 }
