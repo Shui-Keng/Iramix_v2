@@ -125,6 +125,11 @@ Layered, each stage owning one guarantee:
   backup rotation, fail-closed automatic restore.
 - `MediaResolver` — relinks external media by bounded content hash;
   rewrites paths for verified relocations only.
+- `DeviceResolver` — decides what to open from a stored device
+  configuration against an *injected* device inventory. Both resolvers are
+  pure logic over supplied inputs rather than direct filesystem/hardware
+  callers, which is what makes restoration testable without the media or
+  hardware present; keep new restoration layers in that shape.
 
 ### Schema evolution rules
 

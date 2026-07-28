@@ -1,6 +1,7 @@
 #include "iramix/persistence/AsyncProjectSaver.hpp"
 #include "iramix/persistence/AsyncSessionSaver.hpp"
 #include "iramix/persistence/CommandJournal.hpp"
+#include "iramix/persistence/DeviceResolver.hpp"
 #include "iramix/persistence/DiskAudioWorkers.hpp"
 #include "iramix/persistence/MediaResolver.hpp"
 #include "iramix/persistence/ProjectBackupStore.hpp"
@@ -1089,6 +1090,192 @@ void testMediaResolution(const std::filesystem::path& root) {
         << (report.searchBudgetExhausted ? 1 : 0)
         << ", bounded_length_separations=1, replacements_detected=1, "
            "unreadable_files_rejected=1\n";
+}
+
+void testDeviceResolution() {
+    namespace persistence = iramix::persistence;
+
+    const std::vector<persistence::AvailableAudioDevice> inventory {
+        {
+            .backend = persistence::SessionAudioBackend::wasapi,
+            .deviceId = "wasapi-out-0",
+            .name = "Speakers",
+            .supportedSampleRates = {44'100U, 48'000U, 96'000U},
+            .minimumBufferFrames = 64U,
+            .maximumBufferFrames = 2'048U,
+            .inputChannelCount = 0U,
+            .outputChannelCount = 2U,
+        },
+        {
+            .backend = persistence::SessionAudioBackend::wasapi,
+            .deviceId = "wasapi-in-0",
+            .name = "Microphone",
+            .supportedSampleRates = {44'100U, 48'000U},
+            .minimumBufferFrames = 64U,
+            .maximumBufferFrames = 2'048U,
+            .inputChannelCount = 2U,
+            .outputChannelCount = 0U,
+        },
+        {
+            .backend = persistence::SessionAudioBackend::asio,
+            .deviceId = "asio-interface",
+            .name = "Studio Interface",
+            .supportedSampleRates = {48'000U, 96'000U, 192'000U},
+            .minimumBufferFrames = 32U,
+            .maximumBufferFrames = 1'024U,
+            .inputChannelCount = 8U,
+            .outputChannelCount = 8U,
+        },
+    };
+
+    const persistence::SessionDeviceConfiguration exact {
+        .backend = persistence::SessionAudioBackend::asio,
+        .sampleRate = 96'000U,
+        .bufferFrames = 128U,
+        .inputChannelCount = 8U,
+        .outputChannelCount = 8U,
+        .inputDeviceId = "asio-interface",
+        .outputDeviceId = "asio-interface",
+    };
+    auto resolution =
+        persistence::resolveDeviceConfiguration(exact, inventory);
+    require(
+        resolution.status
+                == persistence::DeviceResolutionStatus::restored
+            && resolution.openable()
+            && resolution.reason.empty()
+            && resolution.resolved.sampleRate == 96'000U
+            && resolution.resolved.bufferFrames == 128U
+            && resolution.resolved.outputChannelCount == 8U
+            && resolution.resolved.inputDeviceId == "asio-interface",
+        "an exactly available device restores unchanged"
+    );
+
+    auto renegotiated = exact;
+    renegotiated.sampleRate = 88'200U;
+    renegotiated.bufferFrames = 4'096U;
+    renegotiated.outputChannelCount = 32U;
+    resolution = persistence::resolveDeviceConfiguration(
+        renegotiated,
+        inventory
+    );
+    require(
+        resolution.status
+                == persistence::DeviceResolutionStatus::adjusted
+            && resolution.sampleRateAdjusted
+            && resolution.bufferFramesAdjusted
+            && resolution.channelCountAdjusted
+            && resolution.resolved.sampleRate == 96'000U
+            && resolution.resolved.bufferFrames == 1'024U
+            && resolution.resolved.outputChannelCount == 8U
+            && !resolution.reason.empty(),
+        "unsupported rate, buffer, and channel count renegotiate"
+    );
+
+    // 72'000 sits exactly between the supported 48'000 and 96'000, so it
+    // pins the documented tie-break rather than the nearest-rate rule.
+    auto tie = exact;
+    tie.sampleRate = 72'000U;
+    resolution =
+        persistence::resolveDeviceConfiguration(tie, inventory);
+    require(
+        resolution.resolved.sampleRate == 96'000U,
+        "an equidistant sample rate resolves to the higher option"
+    );
+
+    auto movedMachine = exact;
+    movedMachine.outputDeviceId = "asio-retired-unit";
+    resolution = persistence::resolveDeviceConfiguration(
+        movedMachine,
+        inventory
+    );
+    require(
+        resolution.status
+                == persistence::DeviceResolutionStatus::substituted
+            && resolution.outputDeviceSubstituted
+            && resolution.resolved.outputDeviceId
+                == "asio-interface"
+            && resolution.openable(),
+        "an absent output device substitutes the backend default"
+    );
+
+    auto captureGone = exact;
+    captureGone.inputDeviceId = "asio-retired-input";
+    resolution = persistence::resolveDeviceConfiguration(
+        captureGone,
+        inventory
+    );
+    require(
+        resolution.status
+                == persistence::DeviceResolutionStatus::substituted
+            && resolution.inputDeviceSubstituted
+            && resolution.resolved.inputDeviceId.empty()
+            && resolution.resolved.inputChannelCount == 0U
+            && resolution.resolved.outputDeviceId
+                == "asio-interface",
+        "an absent input device continues without capture"
+    );
+
+    const persistence::SessionDeviceConfiguration foreignBackend {
+        .backend = persistence::SessionAudioBackend::coreAudio,
+        .sampleRate = 48'000U,
+        .bufferFrames = 256U,
+        .inputChannelCount = 2U,
+        .outputChannelCount = 2U,
+        .inputDeviceId = "core-in",
+        .outputDeviceId = "core-out",
+    };
+    resolution = persistence::resolveDeviceConfiguration(
+        foreignBackend,
+        inventory
+    );
+    require(
+        resolution.status
+                == persistence::DeviceResolutionStatus
+                    ::unavailableBackend
+            && !resolution.openable()
+            && resolution.resolved.backend
+                == persistence::SessionAudioBackend::unspecified
+            && resolution.resolved.outputDeviceId.empty(),
+        "a session never migrates to a different audio backend"
+    );
+
+    resolution = persistence::resolveDeviceConfiguration({}, inventory);
+    require(
+        resolution.status
+                == persistence::DeviceResolutionStatus::unconfigured
+            && !resolution.openable()
+            && resolution.resolved.outputDeviceId.empty(),
+        "a session without a device configuration selects nothing"
+    );
+
+    // A resolution must be storable again without tripping validation.
+    persistence::SessionDocument document;
+    document.revision = 1U;
+    document.tracks = {
+        {
+            .stableId = 1U,
+            .type = persistence::SessionTrackType::master,
+            .gain = 1.0F,
+            .color = 0U,
+            .name = "Master",
+        },
+    };
+    document.device = persistence::resolveDeviceConfiguration(
+        movedMachine,
+        inventory
+    ).resolved;
+    std::string error;
+    require(
+        !persistence::serializeSessionDocument(document, error)
+             .empty(),
+        error.c_str()
+    );
+
+    std::cout
+        << "Device resolution: devices=3, restored=1, adjusted=1, "
+           "substituted=2, unavailable_backends=1, unconfigured=1, "
+           "rate_ties_resolved=1, reserialized=1\n";
 }
 
 void testAsyncProjectSaver(
@@ -2502,6 +2689,7 @@ int main(const int argc, char* argv[]) {
     testProjectBackupRotation(temporary.path());
     testSessionDocumentRoundTrip(temporary.path());
     testMediaResolution(temporary.path());
+    testDeviceResolution();
     testAsyncProjectSaver(temporary.path());
     testReferenceProjectBenchmark(temporary.path());
     testAsyncSessionSaver(temporary.path());
