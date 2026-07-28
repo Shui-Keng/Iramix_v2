@@ -1,7 +1,7 @@
 # Automatic Project Backup Restore — 2026-07-28
 
-Status: local Windows MSVC/GCC and Java 21 integration verification passed.
-Hosted three-OS and sanitizer verification is pending. P0-012 remains open.
+Status: local Windows MSVC/GCC plus hosted three-OS, Java 21, and sanitizer
+verification passed. P0-012 remains open.
 
 ## Scope
 
@@ -107,14 +107,30 @@ Automatic backup restore passed after active-project corruption
 - Java 21 compiled with `-Xlint:all -Werror`.
 - Java/C++ corruption, relaunch, recovery, edit, and save flow passed.
 
+## Hosted verification
+
+Source commit:
+`c7a8035743eef987b8b0e31382b2fb82c14030c4`
+
+GitHub Actions:
+[`30351508079`](https://github.com/Shui-Keng/Iramix_v2/actions/runs/30351508079)
+
+- Windows Server 2022: all six CTest targets and Java 21 corruption/relaunch
+  architecture smoke passed.
+- macOS hosted runner: all six CTest targets and Java 21 corruption/relaunch
+  architecture smoke passed.
+- Ubuntu hosted runner: all six CTest targets and Java 21 corruption/relaunch
+  architecture smoke passed.
+- ASan/UBSan: all six CTest targets passed without diagnostics.
+- TSan: all six CTest targets passed without diagnostics.
+
 ## Evidence boundary
 
 This proves the local selection, compatibility, replay, atomic replacement,
 and observability algorithms against deterministic corruption fixtures.
 
-It does not yet prove:
+It does not prove:
 
-- hosted Windows, macOS, Linux, ASan/UBSan, or TSan portability;
 - physical power loss during restore replacement;
 - recovery with full or failing storage;
 - session coverage beyond the currently serialized state;
