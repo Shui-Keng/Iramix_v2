@@ -1,56 +1,195 @@
-# Candidate Dependency Inventory
+# Dependency and License Inventory
 
-No dependency is approved for production merely by appearing here. Every entry
-requires a pinned version, license record, security owner, update policy, and
-three-OS build proof.
+This document separates **what the build actually consumes today** from
+**candidates under consideration**. Appearing in the candidate table
+approves nothing.
 
-| Area | Candidate | Current purpose | Decision |
+Every production dependency requires a pinned version, a license record, a
+security owner, an update policy, and three-OS build proof.
+
+The Java table is machine-regenerable:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\license-inventory.ps1
+```
+
+It reads a Gradle lockfile, resolves each locked coordinate to its POM in
+the Gradle module cache, and exits non-zero if any artifact declares no
+license or is absent from the cache — so a new dependency cannot enter
+unnoticed.
+
+## In the build today
+
+### C++ engine (`iramix_core`)
+
+**Zero third-party dependencies.** The engine links only the C++20
+standard library. Nothing else is vendored, fetched, or found at configure
+time. `third_party/` does not exist.
+
+This is the position to defend: it is what keeps license, supply-chain,
+and real-time risk out of the audio path entirely.
+
+### Java UI runtime
+
+Nine locked artifacts, all declaring Apache-2.0. Verified from the POMs in
+the Gradle module cache on 2026-07-28:
+
+| Coordinate | Declared license |
+|---|---|
+| `org.jetbrains.kotlin:kotlin-stdlib:2.3.20` | Apache-2.0 |
+| `org.jetbrains.kotlinx:kotlinx-coroutines-bom:1.8.0` | Apache-2.0 |
+| `org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.0` | Apache-2.0 |
+| `org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.8.0` | Apache-2.0 |
+| `org.jetbrains.runtime:jbr-api:1.5.0` | Apache-2.0 |
+| `org.jetbrains.skiko:skiko-awt:0.150.1` | Apache-2.0 |
+| `org.jetbrains.skiko:skiko-awt-runtime-<target>:0.150.1` | Apache-2.0 |
+| `org.jetbrains:annotations:13.0` | Apache-2.0 |
+| `org.jetbrains:annotations:23.0.0` | Apache-2.0 |
+
+The set is identical across all five target lockfiles apart from the
+platform-specific Skiko runtime artifact.
+
+### Toolchains
+
+| Component | Pin | License | Notes |
 |---|---|---|---|
-| UI runtime | Eclipse Temurin 21.0.11+10 | Java desktop runtime | Pinned |
-| Java build | Gradle 9.6.1 | UI build and packaging | Pinned |
-| Rendering | Skiko 0.150.1 | Java Skia/window integration | Pinned; Windows spike in progress |
-| Build | CMake + Ninja | Iramix build graph | Accepted |
-| Unit tests | To be selected | Test framework | Open |
+| Eclipse Temurin JDK | 21.0.11+10, SHA-256 pinned in `toolchains.lock.json` | GPL-2.0 **with Classpath Exception** | The Classpath Exception is what permits shipping a runtime image alongside closed-source application code. Record it deliberately; without it this pin would be a blocker. |
+| Gradle | 9.6.1, SHA-256 pinned | Apache-2.0 | Build-time only, not redistributed |
+| CMake + Ninja | Not pinned | BSD-3-Clause / Apache-2.0 | Build-time only, not redistributed |
+| MSVC / AppleClang / GCC | Not pinned | Vendor terms | Build-time only |
+
+### Platform libraries (audio probe only)
+
+| Platform | Linked | Provenance | Redistribution |
+|---|---|---|---|
+| Windows | `avrt`, `ksuser`, `ole32` | Windows SDK import libraries | OS components; not redistributed |
+| macOS | `CoreAudio` framework | Apple SDK | OS component; not redistributed |
+| Linux | `libjack` via `pkg-config` | Distribution package | **See obligation L-2 below** |
+
+None of these are linked into `iramix_core`; they reach only the
+`iramix_audio_probe` executable.
+
+### CI supply chain
+
+| Action | Pin |
+|---|---|
+| `actions/checkout` | `@v7` |
+| `actions/setup-java` | `@v5` |
+| `gradle/actions/setup-gradle` | `@v6` |
+
+**See obligation L-3 below.**
+
+## Open obligations
+
+These are the findings this inventory exists to produce. None is
+theoretical; each names a concrete action.
+
+### L-1 — Skiko runtime jars ship unattributed native code
+
+`skiko-awt-runtime-windows-x64-0.150.1.jar` contains exactly five entries:
+a manifest, `skiko-windows-x64.dll` (14,109,696 bytes), its checksum, and
+`icudtl.dat` (10,468,208 bytes). **There is no `LICENSE`, `NOTICE`, or
+third-party attribution file anywhere in the jar.**
+
+The POM's Apache-2.0 covers Skiko's own source. It does not describe what
+the DLL statically links — Skia (BSD-3-Clause) and, on the evidence of
+`icudtl.dat`, ICU (Unicode licence) — both of which carry attribution
+requirements on binary redistribution.
+
+Action: before any distributable build, obtain the upstream third-party
+notice set for the pinned Skiko version and vendor it into the product's
+attribution file. Shipping the jar as-is does not discharge the obligation,
+and the artifact provides no text to copy.
+
+### L-2 — JACK client library licence is unverified from here
+
+`libjack` is linked on Linux via `pkg-config`. The upstream project
+licenses the client library under LGPL, with the server under GPL, which
+would make dynamic linking acceptable and static linking a policy
+violation under "no GPL dependency in a closed-source path".
+
+**This has not been verified from this machine** — the project has no
+Linux hardware (R-13), and the claim above is from upstream reputation, not
+from an inspected package.
+
+Action: read `/usr/share/doc/libjack-jackd2-dev/copyright` on the CI
+Ubuntu runner and record the actual SPDX identifiers, then confirm the
+link is dynamic. Until then, treat Linux JACK as spike-only, which it
+currently is.
+
+### L-3 — CI actions are pinned to mutable tags
+
+`@v7`, `@v5`, and `@v6` are branch-like major tags that upstream can
+repoint at any time. A compromised or merely changed action would execute
+with repository credentials, and nothing in this repository would record
+that the code had changed.
+
+Action: pin each action to a full commit SHA with the version in a
+trailing comment. This costs nothing and is the standard hardening for
+third-party actions.
+
+### L-4 — Two `org.jetbrains:annotations` versions coexist
+
+`13.0` on the compile classpath and `23.0.0` at runtime. Same license, no
+legal issue, but a version skew worth resolving before it becomes a
+behavioural surprise.
+
+## Candidates — not approved, not in the build
+
+| Area | Candidate | Purpose | Decision |
+|---|---|---|---|
 | Audio files | To be selected | WAV/AIFF/FLAC read/write | Open |
 | Sample-rate conversion | To be selected | Boundary conversion | Open |
 | FFT | To be selected | Spectral analysis and DSP | Open |
-| Serialization | Deterministic binary schema-v3 spike implemented; SQLite plus schema layer remains a production candidate | Session persistence | Open |
-| Windows audio | Steinberg ASIO SDK 2.3 | Optional external Phase 0 host probe | Proprietary selected; signing pending |
-| Linux audio | System JACK client API | Native Phase 0 callback probe | Spike-only; version/license pin pending |
-| Plugin API | CLAP | Plugin hosting | Planned |
-| Plugin API | VST3 SDK | Plugin hosting | Planned |
-| Plugin API | Apple Audio Unit | macOS plugin hosting | Planned |
+| Production storage | SQLite plus schema layer | Session persistence | Open |
+| Windows audio | Steinberg ASIO SDK 2.3 | Optional external probe | Proprietary selected; signing pending |
+| Plugin API | CLAP | Plugin hosting | Planned; MIT upstream, to be confirmed on adoption |
+| Plugin API | VST3 SDK | Plugin hosting | Planned. **Dual GPLv3 / proprietary Steinberg licence — the same shape as ASIO. The closed-source path requires the proprietary agreement.** |
+| Plugin API | Apple Audio Unit | macOS plugin hosting | Planned; Apple SDK terms |
+
+### Resolved since the previous revision
+
+- **Unit test framework** — no longer open. The project uses a
+  hand-written harness (`tests/*.cpp`, a `main()` per suite with a
+  `require()` helper) and takes on no test-framework dependency.
+- **Session serialization** — the deterministic binary schema is
+  implemented and now at v4. SQLite remains a production candidate for
+  storage, not for the document format.
 
 ## Dependency policy
 
-- No GPL dependency may enter a closed-source product path without explicit
-  licensing and legal approval.
-- Audio callback code may not call a dependency unless its real-time behavior is
-  understood and tested.
+- No GPL dependency may enter a closed-source product path without
+  explicit licensing and legal approval.
+- Audio callback code may not call a dependency unless its real-time
+  behaviour is understood and tested.
 - Dependencies using a different build system are wrapped as immutable,
   reproducible artifacts.
 - Every dependency receives automated license and vulnerability inventory.
-- Updating Skiko/Skia or a plugin SDK requires compatibility tests,
-  not only a successful build.
+  License inventory is automated by `scripts/license-inventory.ps1`;
+  **vulnerability inventory is not yet automated.**
+- Updating Skiko/Skia or a plugin SDK requires compatibility tests, not
+  only a successful build.
 
 ## ASIO SDK spike record
 
 - The SDK is not vendored in this repository. The optional
-  `IRAMIX_ASIO_SDK_PATH` CMake cache path must point to a separately supplied
-  checkout.
+  `IRAMIX_ASIO_SDK_PATH` CMake cache path must point to a separately
+  supplied checkout.
 - Steinberg has offered ASIO under a dual proprietary/GPLv3 model since
-  October 2025. Iramix has selected the free proprietary license because the
-  planned commercial product is closed-source; this path has no source-code
-  disclosure obligation. GPLv3 is explicitly not the selected path.
+  October 2025. Iramix has selected the free proprietary license because
+  the planned commercial product is closed-source; this path has no
+  source-code disclosure obligation. GPLv3 is explicitly not the selected
+  path.
 - Official distribution requires an ASIO developer license agreement with
-  Steinberg through the Developer Portal. That agreement has not been signed,
-  so builds containing the ASIO SDK remain experimental/development-only until
-  signing is complete.
+  Steinberg through the Developer Portal. That agreement has not been
+  signed, so builds containing the ASIO SDK remain
+  experimental/development-only until signing is complete.
 - Technical work and Phase 0 measurement may continue while signing is
-  pending. The signing task gates only a distributable public release build.
+  pending. The signing task gates only a distributable public release
+  build.
 - Use of the ASIO name or logo is optional but governed separately by
-  Steinberg's trademark and usage rules. The default Iramix policy is silent
-  protocol support without ASIO branding or logo until branding is
+  Steinberg's trademark and usage rules. The default Iramix policy is
+  silent protocol support without ASIO branding or logo until branding is
   deliberately approved.
 - Primary references:
   [Steinberg dual-license announcement](https://ocl-steinberg-live.steinberg.net/_storage/asset/808575/storage/master/Press%20Release%20-%202025-10-15%20-%20OBS%20Partnership-%20EN.pdf)
