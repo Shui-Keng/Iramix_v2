@@ -24,6 +24,16 @@ set(
     CACHE PATH
     "Path to an external Steinberg ASIO SDK checkout"
 )
+# Optional like the ASIO path, but for a different reason: the VST3 SDK is
+# MIT from 3.8 and could be vendored, yet leaving it external keeps CI free
+# of a large third-party tree it does not need in order to prove the scan
+# isolation. Only plugin *metadata* decoding depends on it.
+set(
+    IRAMIX_VST3_SDK_PATH
+    ""
+    CACHE PATH
+    "Path to an external Steinberg VST3 SDK checkout (3.8 or later)"
+)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CompilerWarnings)
@@ -41,6 +51,7 @@ add_library(iramix_core STATIC
     src/ipc/Protocol.cpp
     src/platform/Platform.cpp
     src/plugin/PluginBridge.cpp
+    src/plugin/PluginScanner.cpp
     src/persistence/AsyncProjectSaver.cpp
     src/persistence/AsyncSessionSaver.cpp
     src/persistence/AutosaveClock.cpp
@@ -66,6 +77,34 @@ target_include_directories(iramix_core
 )
 iramix_set_warnings(iramix_core)
 
+if(IRAMIX_VST3_SDK_PATH)
+    if(NOT EXISTS
+        "${IRAMIX_VST3_SDK_PATH}/pluginterfaces/base/ipluginbase.h")
+        message(
+            FATAL_ERROR
+            "Invalid VST3 SDK path: missing pluginterfaces/base/ipluginbase.h"
+        )
+    endif()
+    # Only the interface headers are used. They are declarations of a
+    # stable ABI, so nothing from the SDK is compiled or linked, and the
+    # scanner still runs without the SDK — it just cannot name a plugin.
+    # SYSTEM so the SDK's own warnings are not this project's to fix. The
+    # build stays clean at /W4 and -Wall -Wextra without lowering the bar
+    # for code we do own.
+    target_include_directories(iramix_core
+        SYSTEM PRIVATE "${IRAMIX_VST3_SDK_PATH}"
+    )
+    target_compile_definitions(iramix_core PRIVATE IRAMIX_HAS_VST3_SDK)
+endif()
+
+# dlopen lives in libdl on glibc older than 2.34.
+if(UNIX AND NOT APPLE)
+    find_library(IRAMIX_DL_LIBRARY dl)
+    if(IRAMIX_DL_LIBRARY)
+        target_link_libraries(iramix_core PUBLIC ${IRAMIX_DL_LIBRARY})
+    endif()
+endif()
+
 # shm_open lives in librt on glibc older than 2.34; harmless where it does not.
 if(UNIX AND NOT APPLE)
     find_library(IRAMIX_RT_LIBRARY rt)
@@ -77,6 +116,10 @@ endif()
 add_executable(iramix_engine_probe apps/engine-probe/main.cpp)
 target_link_libraries(iramix_engine_probe PRIVATE Iramix::Core)
 iramix_set_warnings(iramix_engine_probe)
+
+add_executable(iramix_plugin_scan apps/plugin-scan/main.cpp)
+target_link_libraries(iramix_plugin_scan PRIVATE Iramix::Core)
+iramix_set_warnings(iramix_plugin_scan)
 
 set(IRAMIX_AUDIO_PROBE_SOURCES
     apps/audio-probe/AllocationHooks.cpp

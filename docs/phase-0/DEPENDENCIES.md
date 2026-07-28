@@ -183,11 +183,20 @@ behavioural surprise.
 - **The version matters.** Releases before 3.8 remain under the old dual
   model, so the dependency must be pinned to 3.8 or later. Adopting an
   older tag would silently reintroduce the GPLv3 obligation.
-- Evidence is Steinberg's press release of 2025-10-29 ("VST 3 Now
-  Available Under MIT License"). The press release is the announcement,
-  not the licence: **confirm against `LICENSE.txt` in the SDK checkout on
-  adoption**, and record the SDK version and licence hash in this document
-  at that point.
+- **Confirmed against the SDK itself on 2026-07-29**, as this entry
+  previously required. `vst3sdk/LICENSE.txt` is the MIT text, copyright
+  2025 Steinberg Media Technologies GmbH, and
+  `pluginterfaces/vst/vsttypes.h` declares `kVstVersionString` as
+  `VST 3.8.0`. The press release of 2025-10-29 was the announcement; this
+  is the licence.
+- The SDK is **not vendored**. `IRAMIX_VST3_SDK_PATH` points at a
+  separately supplied checkout, following the ASIO pattern but for a
+  different reason: the licence permits vendoring, and the tree is kept
+  external only because CI does not need it. Headers are included as
+  `SYSTEM` so the SDK's warnings are not this project's to fix.
+- Only plugin *metadata* decoding depends on the SDK. The out-of-process
+  scanner builds and runs without it; see
+  `results/PLUGIN_SCAN_OUT_OF_PROCESS_2026-07-29.md`.
 - The VST name and logo are trademarks governed separately from the SDK
   licence, exactly as with ASIO. The same default policy applies: protocol
   support without branding until branding is deliberately approved.
