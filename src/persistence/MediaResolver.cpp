@@ -115,11 +115,15 @@ std::uint64_t hashMediaFile(
     error.clear();
     hashedBytes = 0U;
     std::error_code code;
-    const auto fileSize = std::filesystem::file_size(path, code);
+    const auto measured = std::filesystem::file_size(path, code);
     if (code) {
         error = "cannot size media file";
         return 0U;
     }
+    // std::uintmax_t is not std::uint64_t on every platform (it is
+    // unsigned long on libc++, unsigned long long here), so narrow once
+    // explicitly rather than relying on template deduction.
+    const auto fileSize = static_cast<std::uint64_t>(measured);
     std::ifstream stream {path, std::ios::binary};
     if (!stream) {
         error = "cannot open media file";
@@ -128,7 +132,8 @@ std::uint64_t hashMediaFile(
     try {
         std::array<char, kHashChunkBytes> chunk {};
         std::uint64_t hash = kFnvOffsetBasis;
-        std::uint64_t remaining = std::min(fileSize, maximumBytes);
+        std::uint64_t remaining =
+            std::min<std::uint64_t>(fileSize, maximumBytes);
         while (remaining > 0U) {
             const auto wanted = static_cast<std::streamsize>(
                 std::min<std::uint64_t>(remaining, chunk.size())

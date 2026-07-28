@@ -206,16 +206,28 @@ branches and redundant history toggles. If newer edits exist, compaction is
 deferred and the original journal remains authoritative.
 
 The Phase 0 session DTO uses globally unique stable entity IDs and an
-independently versioned binary schema. Schema v3 stores revision, sample rate,
-tempo, tracks, clips, routing, and automation. References are validated on
-save and load. V1/v2 migrations supply deterministic defaults and empty v3
-collections; lossy legacy export is rejected. Runtime audio nodes are not
+independently versioned binary schema. Schema v4 stores revision, sample rate,
+tempo, tracks, clips, routing, automation, external media references, MIDI
+sequences, audio device configuration, and per-track plugin slots with opaque
+bounded state. Media sources and MIDI sequences share the clip source ID
+space, so every clip resolves to exactly one declared source and referential
+integrity is total. References are validated on save and load. V1/v2
+migrations supply deterministic defaults and empty collections; v3 migration
+names each clip source as an unresolved media placeholder and fails closed on
+an ID collision; lossy legacy export is rejected. Runtime audio nodes are not
 serialized.
+
+Media restoration resolves each declared source against the project root and
+configured search directories using a bounded content hash, classifying it as
+verified, mismatched, relocated, unverifiable, or missing. Only verified
+relocations rewrite a stored path, so a failed relink cannot bind a session to
+the wrong audio. Device configuration and plugin state are stored and
+round-trip intact but are not yet consumed by any backend or plugin host.
 
 The Java/C++ Phase 0 probe now exercises revisioned journaled edits, undo/redo,
 save acceptance, durable completion, process reopen, history reconstruction,
 and a post-recovery save. A coordinator retains one accepted save and
-coalesces later unaccepted requests to the latest immutable revision. Complete
-DAW session coverage, backup rotation, final media conversion,
-cold-cache/reference-hardware timing, and media/plugin restoration remain
-pending.
+coalesces later unaccepted requests to the latest immutable revision. Final
+media conversion, device and plugin restoration, and
+cold-cache/reference-hardware timing remain pending; reference-hardware
+timing on macOS and Linux is blocked on hardware availability (R-13).
