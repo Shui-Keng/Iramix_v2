@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "java": {
+    "vendor": "Eclipse Temurin",
+    "version": "21.0.11+10",
+    "archive": "OpenJDK21U-jdk_x64_windows_hotspot_21.0.11_10.zip",
+    "url": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.11%2B10/OpenJDK21U-jdk_x64_windows_hotspot_21.0.11_10.zip",
+    "sha256": "d3625e7cadf23787ea540229544b6e2ab494b3b54da1801879e583e1dfee0a64"
+  },
+  "gradle": {
+    "version": "9.6.1",
+    "archive": "gradle-9.6.1-bin.zip",
+    "url": "https://services.gradle.org/distributions/gradle-9.6.1-bin.zip",
+    "sha256": "9c0f7faeeb306cb14e4279a3e084ca6b596894089a0638e68a07c945a32c9e14"
+  },
+  "skiko": {
+    "version": "0.150.1",
+    "group": "org.jetbrains.skiko",
+    "license": "Apache-2.0",
+    "kotlin_stdlib": "2.3.20"
+  }
+}

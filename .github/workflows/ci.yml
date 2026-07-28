@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            preset: windows-msvc
+            engine_probe: build/windows-msvc/Debug/iramix_engine_probe.exe
+          - os: macos-latest
+            preset: dev
+            engine_probe: build/dev/iramix_engine_probe
+          - os: ubuntu-latest
+            preset: dev
+            engine_probe: build/dev/iramix_engine_probe
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.6.1"
+
+      - name: Install JACK development package
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libjack-jackd2-dev
+
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}
+
+      - name: Test
+        run: ctest --preset ${{ matrix.preset }}
+
+      - name: Build and test Java UI and engine handshake
+        run: gradle check -PiramixEngineProbe=${{ matrix.engine_probe }}

@@ -1,0 +1,3 @@
+rootProject.name = "iramix"
+include("ui:desktop")
+

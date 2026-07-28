@@ -1,0 +1,80 @@
+plugins {
+    id "application"
+}
+
+def skikoVersion = "0.150.1"
+def kotlinStdlibVersion = "2.3.20"
+def osName = System.getProperty("os.name").toLowerCase(Locale.ROOT)
+def architecture = System.getProperty("os.arch").toLowerCase(Locale.ROOT)
+
+def skikoTarget
+if (osName.contains("win") && architecture.contains("64")) {
+    skikoTarget = "windows-x64"
+} else if (osName.contains("mac") && architecture.contains("aarch64")) {
+    skikoTarget = "macos-arm64"
+} else if (osName.contains("mac") && architecture.contains("64")) {
+    skikoTarget = "macos-x64"
+} else if (osName.contains("linux") && architecture.contains("aarch64")) {
+    skikoTarget = "linux-arm64"
+} else if (osName.contains("linux") && architecture.contains("64")) {
+    skikoTarget = "linux-x64"
+} else {
+    throw new GradleException(
+        "Unsupported desktop target: ${osName}/${architecture}"
+    )
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+application {
+    mainClass = "com.iramix.ui.IramixDesktop"
+}
+
+dependencies {
+    implementation "org.jetbrains.skiko:skiko-awt:${skikoVersion}"
+    implementation "org.jetbrains.kotlin:kotlin-stdlib:${kotlinStdlibVersion}"
+    runtimeOnly(
+        "org.jetbrains.skiko:skiko-awt-runtime-${skikoTarget}:${skikoVersion}"
+    )
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = "UTF-8"
+    options.compilerArgs.addAll(["-Xlint:all", "-Werror"])
+}
+
+tasks.register("architectureSmoke", JavaExec) {
+    group = "verification"
+    description = "Verifies the Java/C++ handshake contract."
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = "com.iramix.ui.tools.ArchitectureSmoke"
+    providers.gradleProperty("iramixEngineProbe").getOrNull()?.with {
+        environment "IRAMIX_ENGINE_PROBE", it
+    }
+}
+
+tasks.register("ipcLoadTest", JavaExec) {
+    group = "verification"
+    description = "Measures 1,000 IPC commands under dummy Skia UI load."
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = "com.iramix.ui.tools.IpcLoadTest"
+    providers.gradleProperty("iramixEngineProbe").getOrNull()?.with {
+        environment "IRAMIX_ENGINE_PROBE", it
+    }
+}
+
+tasks.named("ipcLoadTest") {
+    mustRunAfter("architectureSmoke")
+}
+
+tasks.named("check") {
+    dependsOn("architectureSmoke", "ipcLoadTest")
+}
+
+dependencyLocking {
+    lockAllConfigurations()
+}

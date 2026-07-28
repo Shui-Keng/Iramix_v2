@@ -1,0 +1,17 @@
+/build/
+/out/
+/graphify-out/
+/third_party/source/
+/third_party/build/
+/.gradle/
+/**/.gradle/
+/**/build/
+/.cache/
+/.idea/
+/.vs/
+/.vscode/
+*.user
+*.suo
+*.swp
+*.tmp
+*.log
