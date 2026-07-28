@@ -45,11 +45,17 @@ graph result into the actual device buffer. Other platform backends and live
 capture remain pending.
 
 Scalar node parameters use a bounded control-to-audio SPSC queue with absolute
-sample timestamps. The callback routes due events into preallocated per-node
-buffers and nodes apply them at sample offsets. Queue saturation, late events,
-unknown targets, and per-node overflow are explicit counters. A seek or loop
-timeline discontinuity must flush and rebase the queue while processing is
-stopped.
+sample timestamps. Value, linear-ramp, and additive-modulation events share
+the same queue. Ramps retain state across process blocks; modulation values
+can change at every sample and persist until replaced. The callback routes due
+events into preallocated per-node buffers and nodes apply them at sample
+offsets. Queue saturation, late events, unknown targets, and per-node overflow
+are explicit counters. A seek or loop timeline discontinuity must flush and
+rebase the queue while processing is stopped.
+
+The outermost callback scope enables hardware denormal protection (x86 FTZ and
+DAZ, or AArch64 FZ where supported), counts protected callback entries, and
+restores the previous floating-point control state on exit.
 
 General real-time commands use a bounded sequenced SPSC queue and return an
 ACK or REJECT containing the applied plan generation. A full completion queue

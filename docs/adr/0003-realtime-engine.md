@@ -49,5 +49,8 @@ in
 Five-topology graph edit-storm results on Windows and Linux, including
 ASan/UBSan and TSan, are recorded in
 [`../phase-0/results/GRAPH_EDIT_STORM_SANITIZERS_2026-07-28.md`](../phase-0/results/GRAPH_EDIT_STORM_SANITIZERS_2026-07-28.md).
-This evidence does not replace the two-hour callback soak, ramp/modulation,
-denormal, or target-hardware backend evidence, so this ADR remains proposed.
+Cross-block ramps, sample-rate modulation, and callback denormal protection
+are recorded in
+[`../phase-0/results/PARAMETER_RAMP_DENORMAL_2026-07-28.md`](../phase-0/results/PARAMETER_RAMP_DENORMAL_2026-07-28.md).
+This evidence does not replace the two-hour callback soak or target-hardware
+backend evidence, so this ADR remains proposed.

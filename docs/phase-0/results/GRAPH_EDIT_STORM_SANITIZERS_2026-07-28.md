@@ -82,6 +82,8 @@ callback timing or dropout targets. Those measurements require real target
 machines and devices. P0-008 therefore remains open, including all mandatory
 two-hour hardware soaks.
 
-Remaining P0-011 work includes parameter ramps and modulation-rate streams,
-denormal instrumentation and tests, production integration for non-WASAPI
-backends, and the final hardware soak evidence.
+Parameter ramps, modulation-rate streams, and denormal handling were completed
+in the subsequent
+[`PARAMETER_RAMP_DENORMAL_2026-07-28.md`](PARAMETER_RAMP_DENORMAL_2026-07-28.md)
+slice. Production integration for non-WASAPI backends and final hardware-soak
+evidence remain pending.
