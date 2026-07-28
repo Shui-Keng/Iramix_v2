@@ -828,6 +828,14 @@ void testAutomaticBackupRestore(
            "active_project_replacements=3\n";
 }
 
+// The window must comfortably exceed three durable journal appends, or the
+// coalescing assertions below race the autosave worker instead of testing
+// it: on macOS an fsync trio overruns a 30 ms window, the window fires
+// between edits, and the third markDirty legitimately opens a new window
+// rather than replacing a pending one. Still far below the five-second
+// product window in ADR-0004, so this only paces the test.
+constexpr std::chrono::milliseconds kAutosaveTestWindow {500};
+
 void testAutosaveScheduler(const std::filesystem::path& root) {
     const auto project = root / "autosave-session.irpx";
     std::string error;
@@ -837,7 +845,7 @@ void testAutosaveScheduler(const std::filesystem::path& root) {
     auto service =
         iramix::persistence::SessionPersistenceService::create(
             project,
-            std::chrono::milliseconds {30},
+            kAutosaveTestWindow,
             error
         );
     require(service != nullptr, error.c_str());
@@ -875,7 +883,7 @@ void testAutosaveScheduler(const std::filesystem::path& root) {
     );
 
     const auto timeout = std::chrono::steady_clock::now()
-        + std::chrono::seconds {5};
+        + std::chrono::seconds {10};
     auto query = service->query(4U);
     while (
         query.status
@@ -905,7 +913,14 @@ void testAutosaveScheduler(const std::filesystem::path& root) {
             && dirtyReplacements == 2U,
         "autosave commits the newest continuous-edit revision"
     );
-    require(elapsed < 1'000.0, "autosave fixed window does not starve");
+    // Anchored to the first dirty revision, so three continuous edits must
+    // not push the deadline out: commit lands near the window, not at a
+    // multiple of it.
+    require(
+        elapsed < 4.0
+            * static_cast<double>(kAutosaveTestWindow.count()),
+        "autosave fixed window does not starve"
+    );
     service->stop();
 
     const auto loaded =
@@ -954,8 +969,9 @@ void testAutosaveScheduler(const std::filesystem::path& root) {
     );
 
     std::cout
-        << "Autosave scheduler: interval_ms=30, edits=3, "
-           "autosave_requests=" << autosaveRequests
+        << "Autosave scheduler: interval_ms="
+        << kAutosaveTestWindow.count()
+        << ", edits=3, autosave_requests=" << autosaveRequests
         << ", dirty_replacements=" << dirtyReplacements << ", "
            "durable_revision=4, elapsed_ms=" << elapsed
         << ", shutdown_flush_revision=2\n";

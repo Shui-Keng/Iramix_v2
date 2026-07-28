@@ -89,16 +89,27 @@ dead_branch_records_removed=6, stable_revision=10,
 original_bytes=800, compacted_bytes=200,
 checkpoint_ms=4.8606
 
-Autosave scheduler: interval_ms=30, edits=3,
+Autosave scheduler: interval_ms=500, edits=3,
 autosave_requests=1, dirty_replacements=2,
-durable_revision=4, elapsed_ms=56.9689,
+durable_revision=4, elapsed_ms=571.406,
 shutdown_flush_revision=2
 ```
 
-The fixed window is not a trailing debounce. On slower GCC runs, the durable
-edit sequence crossed the first 30 ms deadline, so revision 3 used one
-autosave window and revision 4 used a second. This is expected bounded behavior
-and prevents continuous editing from starving persistence.
+The fixed window is not a trailing debounce. Commit lands just after one
+window rather than at a multiple of it, so three continuous edits did not
+push the deadline out.
+
+The test window was originally 30 ms. That is shorter than three durable
+journal appends on macOS, where the window fired between edits and the
+third `markDirty` opened a new window instead of replacing a pending one —
+correct product behavior, but it made the coalescing assertions race the
+autosave worker rather than test it. Windows and Linux happened to finish
+the appends in time; macOS CI failed twice in a row on unrelated commits.
+The window is now 500 ms, which paces the test above fsync latency on all
+three platforms while staying far below the five-second product window in
+ADR-0004. **The change is test pacing only; no scheduler behavior was
+altered.** The earlier 30 ms figures above have been replaced rather than
+kept, because they were measured against a window the test no longer uses.
 
 One manual binary IPC smoke used the Debug engine with a 50 ms interval:
 
