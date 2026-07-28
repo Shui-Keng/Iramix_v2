@@ -70,6 +70,9 @@ File durability uses `_commit` on Windows and `fsync` on POSIX.
   independently.
 - Java/C++ save acceptance is distinct from durable completion and both carry
   the matching session revision.
+- One worker-accepted session save remains immutable and cannot be coalesced
+  away. At most one unaccepted pending snapshot is retained and may be replaced
+  only by a newer revision.
 
 ## Initial evidence
 
@@ -86,8 +89,8 @@ worker pipelines. The stable-ID session DTO plus v1/v2-to-v3 migration fixtures
 are implemented. The session-document pipeline performs serialization on its
 worker and reports separate serialization and durable-save timing.
 
-The Java/C++ probe exercises save acceptance and durable completion, but it
-still constructs a minimal native fixture rather than saving the production
-mutable DAW session. Final media conversion, complete DAW session coverage,
-full-scale large-recording timing, and cold reference-project measurements
-remain pending, so this ADR remains proposed.
+The Java/C++ probe now queries and edits the native session before save, so its
+snapshot no longer originates in the save handler. The edit surface and schema
+are still partial. Final media conversion, complete DAW session coverage,
+command-journal/undo integration, full-scale large-recording timing, and cold
+reference-project measurements remain pending, so this ADR remains proposed.

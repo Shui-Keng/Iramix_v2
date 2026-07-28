@@ -45,7 +45,9 @@ add_library(iramix_core STATIC
     src/persistence/DiskAudioWorkers.cpp
     src/persistence/Persistence.cpp
     src/persistence/SessionDocument.cpp
+    src/persistence/SessionSaveCoordinator.cpp
     src/realtime/Audit.cpp
+    src/session/SessionController.cpp
 )
 
 add_library(Iramix::Core ALIAS iramix_core)
@@ -185,6 +187,18 @@ if(IRAMIX_BUILD_TESTS)
     add_test(
         NAME iramix.persistence
         COMMAND iramix_persistence_tests
+    )
+
+    add_executable(iramix_session_tests tests/SessionTests.cpp)
+    target_link_libraries(
+        iramix_session_tests
+        PRIVATE
+            Iramix::Core
+    )
+    iramix_set_warnings(iramix_session_tests)
+    add_test(
+        NAME iramix.session
+        COMMAND iramix_session_tests
     )
 
     add_test(

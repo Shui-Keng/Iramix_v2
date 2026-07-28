@@ -121,3 +121,7 @@ It does not yet prove:
 
 Hosted CI verifies source portability and sanitizer behavior, but it is not
 reference-storage or audio-hardware evidence.
+
+Native session ownership and save coalescing supersede the save-handler fixture
+boundary in this result:
+[`PRODUCTION_SESSION_SAVE_COALESCING_2026-07-28.md`](PRODUCTION_SESSION_SAVE_COALESCING_2026-07-28.md).

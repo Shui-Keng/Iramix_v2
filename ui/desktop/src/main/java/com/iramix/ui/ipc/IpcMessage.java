@@ -24,7 +24,9 @@ public record IpcMessage(
         SHUTDOWN(5),
         REJECT(6),
         SAVE_SESSION(7),
-        POLL_SAVE_COMPLETION(8);
+        POLL_SAVE_COMPLETION(8),
+        SET_TEMPO(9),
+        SESSION_STATE(10);
 
         private final int wireValue;
 

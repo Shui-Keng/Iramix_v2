@@ -54,5 +54,9 @@ Background session serialization, revisioned Java/C++ save acceptance,
 ordered durable completion, explicit saturation, and separate serialization
 and save-worker timings are covered by
 [`BACKGROUND_SESSION_SAVE_IPC_2026-07-28.md`](results/BACKGROUND_SESSION_SAVE_IPC_2026-07-28.md).
-R-06 remains open until the production session owns the saved snapshot and the
-remaining cold-storage, power-loss, backup, and complete-state drills pass.
+Native session ownership, revision conflicts, immutable snapshot isolation,
+stable-ID continuation, and latest-revision save coalescing are covered by
+[`PRODUCTION_SESSION_SAVE_COALESCING_2026-07-28.md`](results/PRODUCTION_SESSION_SAVE_COALESCING_2026-07-28.md).
+The production-session-ownership portion is therefore addressed; R-06 remains
+open for complete state, journal/undo integration, cold storage, backup, and
+power-loss evidence.

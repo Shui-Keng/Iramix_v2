@@ -63,6 +63,8 @@ Version 1 message type values:
 | 6 | `REJECT` |
 | 7 | `SAVE_SESSION` |
 | 8 | `POLL_SAVE_COMPLETION` |
+| 9 | `SET_TEMPO` |
+| 10 | `SESSION_STATE` |
 
 The executable mode `iramix_engine_probe --ipc-stdio` validates
 `HELLO/WELCOME`, sequenced `PING/ACK`, and clean `SHUTDOWN/ACK`. When launched
@@ -77,7 +79,19 @@ durable staging, and atomic replacement complete. Phase 0 uses polling to keep
 the request/response pipe simple; Phase 1 may replace it with asynchronous
 engine events without changing the durability boundary.
 The Java UI-facing save API performs that wait on a virtual thread and returns
-a `CompletableFuture`; it must not block the AWT event thread.
+a `CompletableFuture`; it must not block the AWT event thread. Only an
+individual request/response exchange owns the Java exchange lock. Waiting
+for durability does not prevent later edit or save commands from being sent.
+The exchange guard is a `ReentrantLock`, not a Java `synchronized` monitor:
+blocking pipe reads while holding a monitor can pin a Java 21 virtual thread
+and starve the reader task. The lock is released between durability polls.
+
+`SESSION_STATE` returns the current native revision and compact state summary.
+`SET_TEMPO` carries `expected_revision`; the engine either applies it and
+returns the resulting revision or rejects it with the current revision. Save
+requests must name the current native revision. The save coordinator may
+replace an unaccepted pending snapshot with a newer revision, but it never
+drops a revision already accepted by the worker.
 
 ## Phase 0 load-test evidence
 
@@ -119,6 +133,8 @@ acts as the regression check.
 - `ENGINE_STATE`: starting, ready, suspended, recovering, or shutting down.
 - `SAVE_SESSION`: enqueue one immutable, revision-matched session snapshot.
 - `POLL_SAVE_COMPLETION`: consume the oldest durable save completion.
+- `SET_TEMPO`: Phase 0 revisioned-edit exemplar against native session state.
+- `SESSION_STATE`: query compact current native session state.
 
 ## Ordering and back-pressure
 

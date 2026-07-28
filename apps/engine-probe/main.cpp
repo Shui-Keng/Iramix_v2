@@ -1,6 +1,7 @@
 #include "iramix/ipc/Protocol.hpp"
-#include "iramix/persistence/AsyncSessionSaver.hpp"
+#include "iramix/persistence/SessionSaveCoordinator.hpp"
 #include "iramix/platform/Platform.hpp"
+#include "iramix/session/SessionController.hpp"
 
 #include <charconv>
 #include <chrono>
@@ -45,6 +46,49 @@ bool configureBinaryStandardStreams() {
         && revision != 0U;
 }
 
+[[nodiscard]] bool parseTempoEdit(
+    const std::string_view payload,
+    std::uint64_t& expectedRevision,
+    double& tempo
+) {
+    constexpr std::string_view revisionPrefix {
+        "expected_revision="
+    };
+    constexpr std::string_view tempoPrefix {"tempo="};
+    if (!payload.starts_with(revisionPrefix)) {
+        return false;
+    }
+    const auto separator = payload.find(';');
+    if (separator == std::string_view::npos) {
+        return false;
+    }
+    const auto revisionValue = payload.substr(
+        revisionPrefix.size(),
+        separator - revisionPrefix.size()
+    );
+    const auto revisionResult = std::from_chars(
+        revisionValue.data(),
+        revisionValue.data() + revisionValue.size(),
+        expectedRevision
+    );
+    const auto tempoField = payload.substr(separator + 1U);
+    if (!tempoField.starts_with(tempoPrefix)) {
+        return false;
+    }
+    const auto tempoValue = tempoField.substr(tempoPrefix.size());
+    const auto tempoResult = std::from_chars(
+        tempoValue.data(),
+        tempoValue.data() + tempoValue.size(),
+        tempo
+    );
+    return revisionResult.ec == std::errc {}
+        && revisionResult.ptr
+            == revisionValue.data() + revisionValue.size()
+        && tempoResult.ec == std::errc {}
+        && tempoResult.ptr == tempoValue.data() + tempoValue.size()
+        && expectedRevision != 0U;
+}
+
 [[nodiscard]] std::string completionPayload(
     const iramix::persistence::SessionSaveCompletion& completion
 ) {
@@ -71,15 +115,19 @@ int runIpcSession(const std::filesystem::path& projectTarget) {
     using iramix::ipc::Message;
     using iramix::ipc::MessageType;
 
-    std::unique_ptr<iramix::persistence::AsyncSessionSaver> saver;
+    iramix::session::SessionController session;
+    std::unique_ptr<
+        iramix::persistence::SessionSaveCoordinator
+    > saveCoordinator;
     std::string setupError;
     if (!projectTarget.empty()) {
-        saver = iramix::persistence::AsyncSessionSaver::create(
+        saveCoordinator =
+            iramix::persistence::SessionSaveCoordinator::create(
             projectTarget,
-            8U,
             setupError
         );
-        if (saver == nullptr || !saver->start(setupError)) {
+        if (saveCoordinator == nullptr
+            || !saveCoordinator->start(setupError)) {
             std::cerr
                 << "Session save worker setup failed: "
                 << setupError << '\n';
@@ -120,68 +168,129 @@ int runIpcSession(const std::filesystem::path& projectTarget) {
                     + std::string {
                         iramix::platform::operatingSystemName()
                     }
-                    + ";capabilities=ping,shutdown"
-                    + (saver != nullptr
+                    + ";capabilities=ping,shutdown,"
+                      "session_state,set_tempo"
+                    + (saveCoordinator != nullptr
                         ? ",save_session,poll_save_completion"
                         : "");
             }
         } else if (request.type == MessageType::ping) {
             response.type = MessageType::acknowledgement;
             response.payload = "pong";
+        } else if (request.type == MessageType::sessionState) {
+            response.type = MessageType::acknowledgement;
+            response.payload = "revision="
+                + std::to_string(session.currentRevision())
+                + ";tracks=" + std::to_string(session.trackCount());
+        } else if (request.type == MessageType::setTempo) {
+            std::uint64_t expectedRevision = 0U;
+            double tempo = 0.0;
+            if (!parseTempoEdit(
+                    request.payload,
+                    expectedRevision,
+                    tempo
+                )) {
+                response.payload = "invalid_tempo_edit";
+            } else {
+                const auto result = session.setTempo(
+                    expectedRevision,
+                    tempo
+                );
+                if (result.applied()) {
+                    response.type = MessageType::acknowledgement;
+                    response.payload = "revision="
+                        + std::to_string(result.revision);
+                } else if (
+                    result.status
+                    == iramix::session::
+                        SessionEditStatus::revisionConflict
+                ) {
+                    response.payload =
+                        "revision_conflict;current_revision="
+                        + std::to_string(result.revision);
+                } else {
+                    response.payload =
+                        "invalid_tempo;current_revision="
+                        + std::to_string(result.revision);
+                }
+            }
         } else if (request.type == MessageType::saveSession) {
             std::uint64_t revision = 0U;
-            if (saver == nullptr) {
+            if (saveCoordinator == nullptr) {
                 response.payload = "project_target_required";
             } else if (!parseRevision(request.payload, revision)) {
                 response.payload = "invalid_save_revision";
+            } else if (revision != session.currentRevision()) {
+                response.payload =
+                    "revision_conflict;current_revision="
+                    + std::to_string(session.currentRevision());
             } else {
-                iramix::persistence::SessionDocument document;
-                document.revision = revision;
-                document.tracks.push_back({
-                    .stableId = 1U,
-                    .type = iramix::persistence::
-                        SessionTrackType::master,
-                    .gain = 1.0F,
-                    .color = 0xFF20'3040U,
-                    .name = "Master",
-                });
-                const auto snapshot = std::make_shared<
-                    const iramix::persistence::SessionDocument
-                >(std::move(document));
-                const auto result =
-                    saver->trySubmit(revision, snapshot);
-                if (result
-                    == iramix::persistence::
-                        ProjectSaveSubmitResult::accepted) {
-                    response.type = MessageType::acknowledgement;
-                    response.payload = "accepted;revision="
-                        + std::to_string(revision);
-                } else if (
-                    result
-                    == iramix::persistence::
-                        ProjectSaveSubmitResult::full
-                ) {
-                    response.payload = "save_pipeline_full";
-                } else {
-                    response.payload = "invalid_save_revision";
+                try {
+                    const auto result =
+                        saveCoordinator->requestSave(
+                            session.snapshot()
+                        );
+                    if (result
+                            == iramix::persistence::
+                                SessionSaveRequestStatus::accepted
+                        || result
+                            == iramix::persistence::
+                                SessionSaveRequestStatus::coalesced
+                        || result
+                            == iramix::persistence::
+                                SessionSaveRequestStatus::
+                                    alreadyRequested) {
+                        response.type =
+                            MessageType::acknowledgement;
+                        response.payload =
+                            (result
+                                == iramix::persistence::
+                                    SessionSaveRequestStatus::coalesced
+                                ? "coalesced;revision="
+                                : "accepted;revision=")
+                            + std::to_string(revision);
+                    } else {
+                        response.payload = "save_request_rejected";
+                    }
+                } catch (const std::bad_alloc&) {
+                    response.payload = "snapshot_allocation_failed";
                 }
             }
         } else if (
             request.type == MessageType::pollSaveCompletion
         ) {
-            if (saver == nullptr) {
+            std::uint64_t revision = 0U;
+            if (saveCoordinator == nullptr) {
                 response.payload = "project_target_required";
+            } else if (!parseRevision(request.payload, revision)) {
+                response.payload = "invalid_save_revision";
             } else {
-                iramix::persistence::SessionSaveCompletion completion;
-                response.type = MessageType::acknowledgement;
-                response.payload =
-                    saver->tryPopCompletion(completion)
-                    ? completionPayload(completion)
-                    : "none";
+                const auto query = saveCoordinator->query(revision);
+                if (query.status
+                    == iramix::persistence::
+                        SessionSaveQueryStatus::committed) {
+                    response.type = MessageType::acknowledgement;
+                    response.payload =
+                        completionPayload(query.completion);
+                } else if (query.status
+                    == iramix::persistence::
+                        SessionSaveQueryStatus::failed
+                ) {
+                    response.type = MessageType::acknowledgement;
+                    response.payload =
+                        completionPayload(query.completion);
+                } else if (query.status
+                    == iramix::persistence::
+                        SessionSaveQueryStatus::pending) {
+                    response.type = MessageType::acknowledgement;
+                    response.payload = "none";
+                } else {
+                    response.payload = "unknown_save_revision";
+                }
             }
         } else if (request.type == MessageType::shutdown) {
-            if (saver != nullptr) {
-                saver->stop();
+            if (saveCoordinator != nullptr) {
+                saveCoordinator->stop();
             }
             response.type = MessageType::acknowledgement;
             response.payload = "shutdown";

@@ -163,6 +163,15 @@ intentionally asynchronous and is not claimed to finish within one UI frame.
 The Java/C++ save smoke supplies correctness evidence for one small project,
 not IPC latency percentiles.
 
+The
+[`production-session and save-coalescing screening`](results/PRODUCTION_SESSION_SAVE_COALESCING_2026-07-28.md)
+deep-copied 20 immutable snapshots of the 200-track/2,000-clip/40,000-point
+reference document. Local MSVC Release recorded snapshot p50 `0.28 ms`, p95
+`0.6029 ms`, and p99/max `1.1254 ms`. A deterministic revision 2/3/4 burst
+submitted only revisions 2 and 4 while preserving revision 4 as the durable
+superset. Snapshot creation is below the 16 ms UI-stall target in this warm
+local screening; cold reference-hardware evidence remains open.
+
 ## Plugin bridge
 
 - bridge overhead target: below 5% of one core for 100 pass-through instances at

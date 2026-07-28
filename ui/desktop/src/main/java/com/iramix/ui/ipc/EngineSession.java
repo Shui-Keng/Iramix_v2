@@ -11,6 +11,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.locks.ReentrantLock;
 
 public final class EngineSession implements AutoCloseable {
     private static final Duration TIMEOUT = Duration.ofSeconds(5);
@@ -18,8 +19,9 @@ public final class EngineSession implements AutoCloseable {
     private final Process process;
     private final ExecutorService readerExecutor;
     private final EngineWelcome welcome;
+    private final ReentrantLock exchangeLock = new ReentrantLock();
     private long nextSequence = 2;
-    private boolean closed;
+    private volatile boolean closed;
 
     private EngineSession(
         Process process,
@@ -87,17 +89,12 @@ public final class EngineSession implements AutoCloseable {
         return welcome;
     }
 
-    public synchronized Duration ping() throws IOException {
-        ensureOpen();
-        var sequence = nextSequence++;
-        var request = new IpcMessage(
-            IpcProtocol.VERSION,
+    public Duration ping() throws IOException {
+        var started = System.nanoTime();
+        var response = exchangeNew(
             IpcMessage.Type.PING,
-            sequence,
             ""
         );
-        var started = System.nanoTime();
-        var response = exchange(request);
         if (
             response.type() != IpcMessage.Type.ACKNOWLEDGEMENT
             || !"pong".equals(response.payload())
@@ -107,41 +104,102 @@ public final class EngineSession implements AutoCloseable {
         return Duration.ofNanos(System.nanoTime() - started);
     }
 
-    public synchronized SessionSaveResult saveSession(long revision)
+    public long currentSessionRevision() throws IOException {
+        var response = exchangeNew(
+            IpcMessage.Type.SESSION_STATE,
+            ""
+        );
+        return parseRequiredLong(
+            response.payload(),
+            "revision",
+            "session state"
+        );
+    }
+
+    public long setTempo(
+        long expectedRevision,
+        double tempo
+    ) throws IOException {
+        if (
+            expectedRevision <= 0
+            || !Double.isFinite(tempo)
+            || tempo <= 0.0
+            || tempo > 1_000.0
+        ) {
+            throw new IllegalArgumentException("Invalid tempo edit.");
+        }
+        var response = exchangeNew(
+            IpcMessage.Type.SET_TEMPO,
+            "expected_revision=" + expectedRevision
+                + ";tempo=" + tempo
+        );
+        return parseRequiredLong(
+            response.payload(),
+            "revision",
+            "tempo edit"
+        );
+    }
+
+    public SessionSaveResult saveSession(long revision)
         throws IOException {
-        ensureOpen();
+        requestSessionSave(revision);
+        return awaitSessionSave(revision);
+    }
+
+    public CompletableFuture<SessionSaveResult> saveSessionAsync(
+        long revision
+    ) {
+        try {
+            requestSessionSave(revision);
+        } catch (IOException exception) {
+            return CompletableFuture.failedFuture(exception);
+        }
+        return CompletableFuture.supplyAsync(
+            () -> {
+                try {
+                    return awaitSessionSave(revision);
+                } catch (IOException exception) {
+                    throw new CompletionException(exception);
+                }
+            },
+            Thread::startVirtualThread
+        );
+    }
+
+    private void requestSessionSave(long revision)
+        throws IOException {
         if (revision <= 0) {
             throw new IllegalArgumentException(
                 "Session revision must be positive."
             );
         }
-        var request = new IpcMessage(
-            IpcProtocol.VERSION,
+        var response = exchangeNew(
             IpcMessage.Type.SAVE_SESSION,
-            nextSequence++,
             "revision=" + revision
         );
-        var response = exchange(request);
         if (
             response.type() != IpcMessage.Type.ACKNOWLEDGEMENT
-            || !response.payload().equals(
-                "accepted;revision=" + revision
-            )
+            || !(response.payload().equals(
+                    "accepted;revision=" + revision
+                )
+                || response.payload().equals(
+                    "coalesced;revision=" + revision
+                ))
         ) {
             throw new IOException(
                 "Engine returned invalid SAVE_SESSION ACK."
             );
         }
+    }
 
+    private SessionSaveResult awaitSessionSave(long revision)
+        throws IOException {
         var deadline = System.nanoTime() + TIMEOUT.toNanos();
         while (System.nanoTime() < deadline) {
-            var poll = new IpcMessage(
-                IpcProtocol.VERSION,
+            var completion = exchangeNew(
                 IpcMessage.Type.POLL_SAVE_COMPLETION,
-                nextSequence++,
-                ""
+                "revision=" + revision
             );
-            var completion = exchange(poll);
             if (!"none".equals(completion.payload())) {
                 return parseSaveCompletion(
                     completion.payload(),
@@ -161,30 +219,15 @@ public final class EngineSession implements AutoCloseable {
         throw new IOException("Session save completion timed out.");
     }
 
-    public CompletableFuture<SessionSaveResult> saveSessionAsync(
-        long revision
-    ) {
-        return CompletableFuture.supplyAsync(
-            () -> {
-                try {
-                    return saveSession(revision);
-                } catch (IOException exception) {
-                    throw new CompletionException(exception);
-                }
-            },
-            Thread::startVirtualThread
-        );
-    }
-
     @Override
-    public synchronized void close() throws IOException {
-        if (closed) {
-            return;
-        }
-        closed = true;
-
+    public void close() throws IOException {
         IOException failure = null;
+        exchangeLock.lock();
         try {
+            if (closed) {
+                return;
+            }
+            closed = true;
             var request = new IpcMessage(
                 IpcProtocol.VERSION,
                 IpcMessage.Type.SHUTDOWN,
@@ -217,6 +260,7 @@ public final class EngineSession implements AutoCloseable {
         } catch (IOException exception) {
             failure = exception;
         } finally {
+            exchangeLock.unlock();
             readerExecutor.shutdownNow();
             if (process.isAlive()) {
                 process.destroyForcibly();
@@ -228,18 +272,33 @@ public final class EngineSession implements AutoCloseable {
         }
     }
 
-    private IpcMessage exchange(IpcMessage request) throws IOException {
-        IpcProtocol.write(process.getOutputStream(), request);
-        var response = readWithTimeout(process, readerExecutor);
-        if (response.sequence() != request.sequence()) {
-            throw sequenceMismatch(request, response);
-        }
-        if (response.type() == IpcMessage.Type.REJECT) {
-            throw new IOException(
-                "Engine rejected message: " + response.payload()
+    private IpcMessage exchangeNew(
+        IpcMessage.Type type,
+        String payload
+    ) throws IOException {
+        exchangeLock.lock();
+        try {
+            ensureOpen();
+            var request = new IpcMessage(
+                IpcProtocol.VERSION,
+                type,
+                nextSequence++,
+                payload
             );
+            IpcProtocol.write(process.getOutputStream(), request);
+            var response = readWithTimeout(process, readerExecutor);
+            if (response.sequence() != request.sequence()) {
+                throw sequenceMismatch(request, response);
+            }
+            if (response.type() == IpcMessage.Type.REJECT) {
+                throw new IOException(
+                    "Engine rejected message: " + response.payload()
+                );
+            }
+            return response;
+        } finally {
+            exchangeLock.unlock();
         }
-        return response;
     }
 
     private IpcMessage exchangeWhileClosing(IpcMessage request)
@@ -332,9 +391,9 @@ public final class EngineSession implements AutoCloseable {
         }
         try {
             var revision = Long.parseLong(fields.get("revision"));
-            if (revision != expectedRevision) {
+            if (revision < expectedRevision) {
                 throw new IOException(
-                    "Session save revision mismatch: expected "
+                    "Session save revision regressed: expected at least "
                         + expectedRevision + ", received " + revision
                 );
             }
@@ -347,6 +406,31 @@ public final class EngineSession implements AutoCloseable {
         } catch (NullPointerException | NumberFormatException exception) {
             throw new IOException(
                 "Malformed session save completion: " + payload,
+                exception
+            );
+        }
+    }
+
+    private static long parseRequiredLong(
+        String payload,
+        String field,
+        String context
+    ) throws IOException {
+        var fields = new java.util.HashMap<String, String>();
+        for (var part : payload.split(";")) {
+            var separator = part.indexOf('=');
+            if (separator > 0) {
+                fields.put(
+                    part.substring(0, separator),
+                    part.substring(separator + 1)
+                );
+            }
+        }
+        try {
+            return Long.parseLong(fields.get(field));
+        } catch (NullPointerException | NumberFormatException exception) {
+            throw new IOException(
+                "Malformed " + context + " response: " + payload,
                 exception
             );
         }

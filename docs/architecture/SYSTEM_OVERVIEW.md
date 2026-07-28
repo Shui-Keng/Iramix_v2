@@ -70,6 +70,12 @@ separate bounded queue; it may drop under saturation, with every drop counted.
 - Atomically publishes a new plan at a buffer boundary.
 - Retires old plans away from the audio thread.
 
+The Phase 0 native `SessionController` now owns the editable session revision,
+stable-ID allocation, and initial tempo/track edit surface. Every edit carries
+an expected revision. Stale or invalid edits leave the document unchanged.
+Persistence receives an explicit deep-copied immutable DTO snapshot; runtime
+audio nodes are still compiled and owned separately.
+
 ### DSP worker pool
 
 - Executes only independent graph partitions.
@@ -184,7 +190,9 @@ collections; lossy legacy export is rejected. Runtime audio nodes are not
 serialized.
 
 The Java/C++ Phase 0 probe now exercises revisioned save acceptance and durable
-completion through IPC. Its native snapshot is still a minimal engine-probe
-fixture rather than the full mutable DAW session. Complete DAW session
-coverage, final media conversion, cold-cache/reference-hardware timing, and
-media/plugin restoration remain pending.
+completion through IPC. The saved snapshot now comes from the native editable
+session after a revisioned tempo edit. A coordinator retains one accepted save
+and coalesces later unaccepted requests to the latest immutable revision.
+Complete DAW session coverage, command-journal/undo integration, final media
+conversion, cold-cache/reference-hardware timing, and media/plugin restoration
+remain pending.

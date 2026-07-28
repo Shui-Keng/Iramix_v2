@@ -40,14 +40,31 @@ public final class ArchitectureSmoke {
                 throw new AssertionError("Engine did not advertise PING.");
             }
             session.ping();
+            var revision = session.currentSessionRevision();
+            if (revision != 1) {
+                throw new AssertionError(
+                    "Engine session did not start at revision 1."
+                );
+            }
+            revision = session.setTempo(revision, 132.0);
+            if (revision != 2) {
+                throw new AssertionError(
+                    "Revisioned tempo edit did not apply."
+                );
+            }
             if (!welcome.capabilities().contains("save_session")) {
                 throw new AssertionError(
                     "Engine did not advertise session save."
                 );
             }
-            var saved = session.saveSessionAsync(1).get();
+            var firstSave = session.saveSessionAsync(revision);
+            revision = session.setTempo(revision, 133.0);
+            var latestSave = session.saveSessionAsync(revision);
+            var saved = latestSave.get();
+            var covered = firstSave.get();
             if (
-                saved.revision() != 1
+                saved.revision() != revision
+                || covered.revision() < 2
                 || saved.serializedBytes() == 0
                 || saved.serializationNanoseconds() == 0
                 || saved.durableSaveNanoseconds() == 0
@@ -62,7 +79,10 @@ public final class ArchitectureSmoke {
                     + welcome.operatingSystem() + " (bytes="
                     + saved.serializedBytes() + ", serialize_ns="
                     + saved.serializationNanoseconds() + ", save_ns="
-                    + saved.durableSaveNanoseconds() + ")."
+                    + saved.durableSaveNanoseconds()
+                    + ", production_revision=" + revision
+                    + ", covered_revision=" + covered.revision()
+                    + ")."
             );
         } finally {
             Files.deleteIfExists(project);
