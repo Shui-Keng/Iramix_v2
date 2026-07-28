@@ -23,6 +23,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #if defined(_WIN32)
@@ -356,6 +357,84 @@ void testSessionDocumentRoundTrip(
             .name = "Master",
         },
     };
+    source.mediaSources = {
+        {
+            .stableId = 50'001U,
+            .contentHash = 0xABCD'1234'5678'9ABCULL,
+            .frameCount = 480'000U,
+            .sampleRate = 96'000U,
+            .channelCount = 2U,
+            .path = "media/field-recording.wav",
+            .name = "Field recording",
+        },
+    };
+    source.midiSequences = {
+        {
+            .stableId = 50'002U,
+            .name = "Phrase",
+            .notes = {
+                {
+                    .startFrame = 0U,
+                    .lengthFrames = 12'000U,
+                    .channel = 0U,
+                    .key = 60U,
+                    .velocity = 0.8F,
+                },
+                {
+                    .startFrame = 0U,
+                    .lengthFrames = 12'000U,
+                    .channel = 0U,
+                    .key = 64U,
+                    .velocity = 0.7F,
+                },
+                {
+                    .startFrame = 24'000U,
+                    .lengthFrames = 6'000U,
+                    .channel = 1U,
+                    .key = 67U,
+                    .velocity = 1.0F,
+                },
+            },
+        },
+    };
+    source.device = {
+        .backend = iramix::persistence::SessionAudioBackend::asio,
+        .sampleRate = 96'000U,
+        .bufferFrames = 128U,
+        .inputChannelCount = 4U,
+        .outputChannelCount = 8U,
+        .inputDeviceId = "asio-input-0",
+        .outputDeviceId = "asio-output-0",
+    };
+    source.plugins = {
+        {
+            .stableId = 6'001U,
+            .targetTrackId = 205U,
+            .format =
+                iramix::persistence::SessionPluginFormat::clap,
+            .slotIndex = 0U,
+            .bypassed = false,
+            .identifier = "com.iramix.reverb",
+            .name = "Hall",
+            .state = {
+                std::byte {0x01U},
+                std::byte {0xFFU},
+                std::byte {0x00U},
+                std::byte {0x7FU},
+            },
+        },
+        {
+            .stableId = 6'002U,
+            .targetTrackId = 205U,
+            .format =
+                iramix::persistence::SessionPluginFormat::vst3,
+            .slotIndex = 1U,
+            .bypassed = true,
+            .identifier = "com.iramix.compressor",
+            .name = "Bus glue",
+            .state = {},
+        },
+    };
     source.clips = {
         {
             .stableId = 2'001U,
@@ -441,11 +520,44 @@ void testSessionDocumentRoundTrip(
                 == 3U,
         "current session schema round trips deterministically"
     );
+    require(
+        decoded.document.mediaSources.size() == 1U
+            && decoded.document.mediaSources[0].path
+                == "media/field-recording.wav"
+            && decoded.document.mediaSources[0].contentHash
+                == 0xABCD'1234'5678'9ABCULL
+            && decoded.document.mediaSources[0].frameCount
+                == 480'000U
+            && decoded.document.mediaSources[0].channelCount == 2U
+            && decoded.document.midiSequences.size() == 1U
+            && decoded.document.midiSequences[0].notes.size() == 3U
+            && decoded.document.midiSequences[0].notes[2].channel
+                == 1U
+            && decoded.document.midiSequences[0].notes[2].key == 67U
+            && decoded.document.device.backend
+                == iramix::persistence::SessionAudioBackend::asio
+            && decoded.document.device.bufferFrames == 128U
+            && decoded.document.device.outputDeviceId
+                == "asio-output-0"
+            && decoded.document.plugins.size() == 2U
+            && decoded.document.plugins[0].identifier
+                == "com.iramix.reverb"
+            && decoded.document.plugins[0].state.size() == 4U
+            && decoded.document.plugins[0].state[3]
+                == std::byte {0x7FU}
+            && decoded.document.plugins[1].bypassed
+            && decoded.document.plugins[1].state.empty(),
+        "media, MIDI, device, and plugin state round trip intact"
+    );
 
     auto legacySource = source;
     legacySource.clips.clear();
     legacySource.routes.clear();
     legacySource.automationLanes.clear();
+    legacySource.mediaSources.clear();
+    legacySource.midiSequences.clear();
+    legacySource.plugins.clear();
+    legacySource.device = {};
     const auto legacyBytes =
         iramix::persistence::serializeSessionDocument(
             legacySource,
@@ -499,6 +611,52 @@ void testSessionDocumentRoundTrip(
             2U
         ).empty(),
         "lossy export to schema v2 is rejected"
+    );
+
+    auto schemaV3Source = source;
+    schemaV3Source.midiSequences.clear();
+    schemaV3Source.plugins.clear();
+    schemaV3Source.device = {};
+    schemaV3Source.mediaSources.clear();
+    for (const auto& clip : schemaV3Source.clips) {
+        iramix::persistence::SessionMediaSource placeholder;
+        placeholder.stableId = clip.sourceId;
+        schemaV3Source.mediaSources.push_back(placeholder);
+    }
+    const auto schemaV3Bytes =
+        iramix::persistence::serializeSessionDocument(
+            schemaV3Source,
+            error,
+            3U
+        );
+    require(!schemaV3Bytes.empty(), error.c_str());
+    decoded =
+        iramix::persistence::deserializeSessionDocument(
+            schemaV3Bytes
+        );
+    require(
+        decoded.ok()
+            && decoded.sourceSchemaVersion == 3U
+            && decoded.migrated
+            && decoded.document.clips.size() == 2U
+            && decoded.document.mediaSources.size() == 2U
+            && decoded.document.mediaSources[0].stableId == 50'001U
+            && decoded.document.mediaSources[0].path.empty()
+            && decoded.document.mediaSources[1].stableId == 50'002U
+            && decoded.document.midiSequences.empty()
+            && decoded.document.plugins.empty()
+            && decoded.document.device.backend
+                == iramix::persistence::SessionAudioBackend
+                    ::unspecified,
+        "schema v3 migrates clip sources to unresolved media placeholders"
+    );
+    require(
+        iramix::persistence::serializeSessionDocument(
+            source,
+            error,
+            3U
+        ).empty(),
+        "lossy export to schema v3 is rejected"
     );
 
     const auto project = root / "session-round-trip.irpx";
@@ -558,10 +716,89 @@ void testSessionDocumentRoundTrip(
         "dangling session references are rejected"
     );
 
+    auto danglingSource = source;
+    danglingSource.clips[0].sourceId = 987'654U;
+    require(
+        iramix::persistence::serializeSessionDocument(
+            danglingSource,
+            error
+        ).empty(),
+        "clips referencing an undeclared source are rejected"
+    );
+    auto unorderedNotes = source;
+    std::swap(
+        unorderedNotes.midiSequences[0].notes[0],
+        unorderedNotes.midiSequences[0].notes[1]
+    );
+    require(
+        iramix::persistence::serializeSessionDocument(
+            unorderedNotes,
+            error
+        ).empty(),
+        "unordered MIDI notes are rejected"
+    );
+    auto invalidVelocity = source;
+    invalidVelocity.midiSequences[0].notes[0].velocity = 1.5F;
+    require(
+        iramix::persistence::serializeSessionDocument(
+            invalidVelocity,
+            error
+        ).empty(),
+        "out-of-range MIDI velocity is rejected"
+    );
+    auto duplicateSlot = source;
+    duplicateSlot.plugins[1].slotIndex =
+        duplicateSlot.plugins[0].slotIndex;
+    require(
+        iramix::persistence::serializeSessionDocument(
+            duplicateSlot,
+            error
+        ).empty(),
+        "duplicate plugin slots on one track are rejected"
+    );
+    auto anonymousPlugin = source;
+    anonymousPlugin.plugins[0].identifier.clear();
+    require(
+        iramix::persistence::serializeSessionDocument(
+            anonymousPlugin,
+            error
+        ).empty(),
+        "plugins without a restorable identifier are rejected"
+    );
+    auto backendlessDevice = source;
+    backendlessDevice.device.backend =
+        iramix::persistence::SessionAudioBackend::unspecified;
+    require(
+        iramix::persistence::serializeSessionDocument(
+            backendlessDevice,
+            error
+        ).empty(),
+        "device IDs without a backend are rejected"
+    );
+    auto oversizedBuffer = source;
+    oversizedBuffer.device.bufferFrames = 1'000'000U;
+    require(
+        iramix::persistence::serializeSessionDocument(
+            oversizedBuffer,
+            error
+        ).empty(),
+        "out-of-range device buffer sizes are rejected"
+    );
+
+    auto truncated = currentBytes;
+    truncated.pop_back();
+    require(
+        !iramix::persistence::deserializeSessionDocument(truncated)
+             .ok(),
+        "truncated schema v4 input is rejected"
+    );
+
     std::cout
-        << "Session document: current_schema=3, tracks=3, "
+        << "Session document: current_schema=4, tracks=3, "
            "clips=2, routes=1, automation_lanes=1, "
-           "v1_migrations=1, v2_migrations=1, "
+           "media_sources=1, midi_sequences=1, midi_notes=3, "
+           "plugins=2, plugin_state_bytes=4, "
+           "v1_migrations=1, v2_migrations=1, v3_migrations=1, "
            "unknown_schemas_rejected=1, project_round_trips=1\n";
 }
 
@@ -821,15 +1058,30 @@ makeReferenceSession() {
     constexpr std::uint64_t routeBase = 200'000U;
     constexpr std::uint64_t automationBase = 300'000U;
     constexpr std::uint64_t sourceBase = 1'000'000U;
+    constexpr std::uint64_t pluginBase = 2'000'000U;
     constexpr std::size_t trackCount = 200U;
     constexpr std::size_t clipCount = 2'000U;
+    constexpr std::size_t audioClipCount = 1'500U;
+    constexpr std::size_t midiSequenceCount =
+        clipCount - audioClipCount;
+    constexpr std::size_t notesPerSequence = 200U;
     constexpr std::size_t automationLaneCount = 40U;
     constexpr std::size_t pointsPerLane = 1'000U;
+    constexpr std::size_t pluginStateBytes = 4'096U;
 
     iramix::persistence::SessionDocument document;
     document.revision = 10'000U;
     document.sampleRate = 48'000U;
     document.tempo = 128.0;
+    document.device = {
+        .backend = iramix::persistence::SessionAudioBackend::wasapi,
+        .sampleRate = 48'000U,
+        .bufferFrames = 256U,
+        .inputChannelCount = 2U,
+        .outputChannelCount = 2U,
+        .inputDeviceId = "reference-input-device",
+        .outputDeviceId = "reference-output-device",
+    };
     document.tracks.reserve(trackCount);
     for (std::size_t index = 0U; index < trackCount; ++index) {
         document.tracks.push_back({
@@ -845,6 +1097,51 @@ makeReferenceSession() {
                 + static_cast<std::uint32_t>(index),
             .name = "Reference track " + std::to_string(index),
         });
+    }
+
+    document.mediaSources.reserve(audioClipCount);
+    for (std::size_t index = 0U; index < audioClipCount; ++index) {
+        document.mediaSources.push_back({
+            .stableId = sourceBase + index,
+            .contentHash = 0x5EED'0000'0000'0000ULL
+                + static_cast<std::uint64_t>(index),
+            .frameCount = 96'000U,
+            .sampleRate = 48'000U,
+            .channelCount = 2U,
+            .path = "media/reference-" + std::to_string(index)
+                + ".wav",
+            .name = "Reference media " + std::to_string(index),
+        });
+    }
+
+    document.midiSequences.reserve(midiSequenceCount);
+    for (
+        std::size_t index = 0U;
+        index < midiSequenceCount;
+        ++index
+    ) {
+        iramix::persistence::SessionMidiSequence sequence;
+        sequence.stableId = sourceBase + audioClipCount + index;
+        sequence.name = "Reference MIDI " + std::to_string(index);
+        sequence.notes.reserve(notesPerSequence);
+        for (
+            std::size_t noteIndex = 0U;
+            noteIndex < notesPerSequence;
+            ++noteIndex
+        ) {
+            sequence.notes.push_back({
+                .startFrame =
+                    static_cast<std::uint64_t>(noteIndex) * 6'000U,
+                .lengthFrames = 4'800U,
+                .channel = 0U,
+                .key = static_cast<std::uint32_t>(
+                    36U + noteIndex % 48U
+                ),
+                .velocity = 0.5F
+                    + static_cast<float>(noteIndex % 50U) / 100.0F,
+            });
+        }
+        document.midiSequences.push_back(std::move(sequence));
     }
 
     document.clips.reserve(clipCount);
@@ -902,6 +1199,26 @@ makeReferenceSession() {
             });
         }
         document.automationLanes.push_back(std::move(lane));
+    }
+
+    document.plugins.reserve(trackCount);
+    for (std::size_t index = 0U; index < trackCount; ++index) {
+        document.plugins.push_back({
+            .stableId = pluginBase + index,
+            .targetTrackId = trackBase + index,
+            .format = index % 2U == 0U
+                ? iramix::persistence::SessionPluginFormat::clap
+                : iramix::persistence::SessionPluginFormat::vst3,
+            .slotIndex = 0U,
+            .bypassed = index % 13U == 0U,
+            .identifier = "com.iramix.reference.plugin."
+                + std::to_string(index),
+            .name = "Reference plugin " + std::to_string(index),
+            .state = std::vector<std::byte>(
+                pluginStateBytes,
+                static_cast<std::byte>(index % 251U)
+            ),
+        });
     }
     return document;
 }
@@ -1030,6 +1347,9 @@ void testReferenceProjectBenchmark(
     std::cout
         << "Reference project: tracks=200, clips=2000, routes=199, "
            "automation_lanes=40, automation_points=40000, "
+           "media_sources=1500, midi_sequences=500, "
+           "midi_notes=100000, plugins=200, "
+           "plugin_state_bytes=819200, "
            "project_bytes=" << projectBytes
         << ", iterations=" << benchmarkIterations
         << ", serialize_p50_ms=" << serializeP50

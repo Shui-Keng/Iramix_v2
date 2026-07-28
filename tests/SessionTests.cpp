@@ -91,6 +91,17 @@ makeReferenceSession() {
             .name = "Track " + std::to_string(index),
         });
     }
+    document.mediaSources.reserve(clipCount);
+    for (std::size_t index = 0U; index < clipCount; ++index) {
+        document.mediaSources.push_back({
+            .stableId = sourceBase + index,
+            .frameCount = 96'000U,
+            .sampleRate = 48'000U,
+            .channelCount = 2U,
+            .path = "media/source-" + std::to_string(index) + ".wav",
+            .name = "Source " + std::to_string(index),
+        });
+    }
     document.clips.reserve(clipCount);
     for (std::size_t index = 0U; index < clipCount; ++index) {
         document.clips.push_back({
