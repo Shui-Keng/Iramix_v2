@@ -8,6 +8,11 @@ project(
 )
 
 option(IRAMIX_BUILD_TESTS "Build Iramix tests" ON)
+option(
+    IRAMIX_ENABLE_SANITIZERS
+    "Enable AddressSanitizer and UndefinedBehaviorSanitizer"
+    OFF
+)
 set(
     IRAMIX_ASIO_SDK_PATH
     ""
@@ -17,6 +22,8 @@ set(
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CompilerWarnings)
+include(Sanitizers)
+iramix_enable_sanitizers()
 
 add_library(iramix_core STATIC
     src/audio/DeviceBufferConversion.cpp

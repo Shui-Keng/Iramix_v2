@@ -51,3 +51,21 @@ jobs:
         run: gradle check
         env:
           IRAMIX_ENGINE_PROBE: ${{ github.workspace }}/${{ matrix.engine_probe }}
+
+  sanitizers:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install JACK development package
+        run: sudo apt-get update && sudo apt-get install -y libjack-jackd2-dev
+
+      - name: Configure ASan and UBSan
+        run: cmake --preset sanitizers
+
+      - name: Build ASan and UBSan
+        run: cmake --build --preset sanitizers
+
+      - name: Test ASan and UBSan
+        run: ctest --preset sanitizers

@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <string>
 #include <thread>
@@ -59,54 +60,160 @@ public:
     ) noexcept override {}
 };
 
+class PassThroughNode final : public iramix::audio::IAudioNode {
+public:
+    void prepare(
+        const iramix::audio::NodePrepareInfo&
+    ) override {}
+
+    void process(
+        const iramix::audio::NodeProcessContext&
+    ) noexcept override {}
+};
+
+struct EditVariant final {
+    iramix::audio::RenderPlan plan;
+    std::map<
+        iramix::audio::NodeId,
+        std::shared_ptr<iramix::audio::IAudioNode>
+    > nodes;
+};
+
+EditVariant makeEditVariant(
+    const int editIndex,
+    const std::shared_ptr<OutputNode>& output
+) {
+    constexpr iramix::audio::NodeId sourceA = 1U;
+    constexpr iramix::audio::NodeId sourceB = 2U;
+    constexpr iramix::audio::NodeId processorA = 10U;
+    constexpr iramix::audio::NodeId processorB = 20U;
+    constexpr iramix::audio::NodeId outputId = 100U;
+
+    EditVariant variant;
+    iramix::audio::GraphDescription graph;
+    iramix::audio::NodeInfoMap info;
+
+    const auto addNode = [&](const iramix::audio::NodeId id,
+                             const iramix::audio::NodeInfo nodeInfo,
+                             std::shared_ptr<
+                                 iramix::audio::IAudioNode
+                             > node) {
+        require(graph.addNode(id), "edit-storm node");
+        info.emplace(id, nodeInfo);
+        variant.nodes.emplace(id, std::move(node));
+    };
+    const auto connect = [&](
+        const iramix::audio::NodeId source,
+        const iramix::audio::NodeId destination
+    ) {
+        require(
+            graph.addConnection({source, 0, destination, 0}),
+            "edit-storm connection"
+        );
+    };
+
+    addNode(
+        sourceA,
+        {0, 1, 0},
+        std::make_shared<ConstantNode>(
+            static_cast<float>(editIndex)
+        )
+    );
+    addNode(outputId, {1, 0, 0}, output);
+
+    switch (editIndex % 5) {
+    case 0:
+        connect(sourceA, outputId);
+        break;
+    case 1:
+        addNode(
+            processorA,
+            {1, 1, 0},
+            std::make_shared<PassThroughNode>()
+        );
+        connect(sourceA, processorA);
+        connect(processorA, outputId);
+        break;
+    case 2:
+        addNode(
+            sourceB,
+            {0, 1, 0},
+            std::make_shared<ConstantNode>(0.0F)
+        );
+        connect(sourceA, outputId);
+        connect(sourceB, outputId);
+        break;
+    case 3:
+        addNode(
+            processorA,
+            {1, 1, 17},
+            std::make_shared<PassThroughNode>()
+        );
+        addNode(
+            processorB,
+            {1, 1, 0},
+            std::make_shared<PassThroughNode>()
+        );
+        addNode(
+            sourceB,
+            {0, 1, 0},
+            std::make_shared<ConstantNode>(0.0F)
+        );
+        connect(sourceA, processorA);
+        connect(sourceB, processorB);
+        connect(processorA, outputId);
+        connect(processorB, outputId);
+        break;
+    default:
+        addNode(
+            processorA,
+            {1, 1, 0},
+            std::make_shared<PassThroughNode>()
+        );
+        addNode(
+            processorB,
+            {1, 1, 0},
+            std::make_shared<PassThroughNode>()
+        );
+        connect(sourceA, processorA);
+        connect(processorA, processorB);
+        connect(processorB, outputId);
+        break;
+    }
+
+    variant.plan = iramix::audio::compileRenderPlan(graph, info);
+    require(variant.plan.valid, variant.plan.error.c_str());
+    return variant;
+}
+
 } // namespace
 
 int main() {
-    constexpr int replacementCount = 1'000;
+    constexpr int replacementCount = 5'000;
     constexpr int blockSize = 64;
-
-    iramix::audio::GraphDescription graph;
-    require(graph.addNode(1U), "source node");
-    require(graph.addNode(2U), "output node");
-    require(
-        graph.addConnection({1U, 0, 2U, 0}),
-        "source-to-output edge"
-    );
-    const iramix::audio::NodeInfoMap info {
-        {1U, {0, 1, 0}},
-        {2U, {1, 0, 0}},
-    };
-    const auto plan =
-        iramix::audio::compileRenderPlan(graph, info);
-    require(plan.valid, "swap plan compiles");
 
     iramix::audio::RenderPlanExecutor executor;
     auto output = std::make_shared<OutputNode>();
     std::string error;
 
     const auto publish = [&](const int value) {
-        auto source = std::make_shared<ConstantNode>(
-            static_cast<float>(value)
-        );
+        auto variant = makeEditVariant(value, output);
         const bool published = executor.prepareAndPublish(
-            plan,
+            variant.plan,
             {
                 .maximumBlockSize = blockSize,
                 .maximumMidiEventsPerNode = 8,
                 .maximumMidiBytesPerNode = 32,
-                .outputNode = 2U,
+                .outputNode = 100U,
                 .outputChannelCount = 1,
             },
-            [source = std::move(source), output](
+            [nodes = std::move(variant.nodes)](
                 const iramix::audio::NodeId id
             ) -> std::shared_ptr<iramix::audio::IAudioNode> {
-                if (id == 1U) {
-                    return source;
-                }
-                if (id == 2U) {
-                    return output;
-                }
-                return {};
+                const auto iterator = nodes.find(id);
+                return iterator != nodes.end()
+                    ? iterator->second
+                    : nullptr;
             },
             error
         );
@@ -189,7 +296,7 @@ int main() {
     );
 
     std::cout
-        << "Plan swap stress: publications="
+        << "Graph edit storm: variants=5, publications="
         << replacementCount + 1
         << ", blocks=" << executor.renderedBlockCount()
         << ", observed_swaps=" << executor.observedSwapCount()
