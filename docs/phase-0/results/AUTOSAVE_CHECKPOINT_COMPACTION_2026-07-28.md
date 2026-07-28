@@ -1,7 +1,7 @@
 # Autosave, Checkpoint, and Journal Compaction — 2026-07-28
 
-Status: local Windows MSVC/GCC correctness passed; hosted three-OS Java/C++
-and sanitizer verification pending. P0-012 remains open.
+Status: local Windows MSVC/GCC and hosted three-OS Java/C++ plus sanitizer
+verification passed. P0-012 remains open.
 
 ## Scope
 
@@ -121,6 +121,28 @@ After restart, revision 2, durable revision 2, and undo depth 1 were retained.
   checkpoint, shutdown, and reopen.
 - Java 21/Gradle is unavailable locally; hosted CI is the Java and portability
   gate.
+
+## Hosted verification
+
+Source commit:
+`e64416cc76501010bc718f566b2b3b769d073d46`
+
+GitHub Actions:
+[`30347845580`](https://github.com/Shui-Keng/Iramix_v2/actions/runs/30347845580)
+
+- Windows Server 2022: all six CTest targets and Java 21 architecture/load
+  smoke passed.
+- macOS hosted runner: all six CTest targets and Java 21 architecture/load
+  smoke passed.
+- Ubuntu hosted runner: all six CTest targets and Java 21 architecture/load
+  smoke passed.
+- ASan/UBSan: all six CTest targets passed without diagnostics.
+- TSan: all six CTest targets passed without diagnostics.
+
+The Java architecture smoke applies revisioned edit/undo/redo, waits for
+revision 4 to become durable through the 50 ms timer without `SAVE_SESSION`,
+then covers manual coalesced saves, process restart, recovered undo, and a
+durable revision-6 save.
 
 ## Evidence boundary
 
