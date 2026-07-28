@@ -7,7 +7,7 @@ Scoring: probability and impact range from 1 to 5. Priority is their product.
 | R-01 | Scope exceeds available team capacity | 5 | 5 | 25 | Enforce the v1 scope contract and validate team size |
 | R-02 | Plugin crash or hang destabilizes audio | 4 | 5 | 20 | Bounded-deadline shared-memory bridge measured: host survives child crash and hang, degrading to counted silence. See `results/PLUGIN_PROCESS_ISOLATION_2026-07-28.md`. Evidence is against a stand-in child, not a real plugin |
 | R-03 | Skiko/Skia GPU behavior differs substantially by OS | 4 | 4 | 16 | Run one renderer and device-loss spike per OS |
-| R-04 | Linux plugin editors fail under Wayland | 4 | 4 | 16 | Test XWayland, native Wayland, and generic editor fallback |
+| R-04 | Linux plugin editors fail under Wayland | 4 | 4 | 16 | **Cannot be closed in Phase 0: no Linux hardware (see R-13).** Native Wayland has no cross-client reparenting mechanism at all, so the generic-editor fallback is a requirement rather than a contingency. See `results/PLUGIN_EDITOR_EMBEDDING_RISK_2026-07-29.md` |
 | R-05 | Multicore graph scheduling misses deadlines | 3 | 5 | 15 | Stabilize single coordinator first; benchmark graph partitions |
 | R-06 | Project corruption destroys user work | 2 | 5 | 10 | Journaled commands, atomic saves, and forced-crash drills |
 | R-07 | AWT/Skiko lacks DAW-grade input, accessibility, or native-window behavior | 4 | 3 | 12 | Test IME, accessibility, HiDPI, focus, and plugin-window embedding early |
