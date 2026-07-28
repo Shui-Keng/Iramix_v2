@@ -48,4 +48,6 @@ jobs:
         run: ctest --preset ${{ matrix.preset }}
 
       - name: Build and test Java UI and engine handshake
-        run: gradle check -PiramixEngineProbe=${{ matrix.engine_probe }}
+        run: gradle check
+        env:
+          IRAMIX_ENGINE_PROBE: ${{ github.workspace }}/${{ matrix.engine_probe }}
