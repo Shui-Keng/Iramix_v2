@@ -58,6 +58,19 @@ Run a short audio callback screening pass:
 .\build\windows-msvc\Debug\iramix_audio_probe.exe --seconds-per-buffer 3
 ```
 
+List the audio endpoints as the session device resolver sees them, then
+capture the current device into a session and reopen the session on it:
+
+```powershell
+.\build\windows-msvc\Debug\iramix_audio_probe.exe --list-devices
+.\build\windows-msvc\Debug\iramix_audio_probe.exe --capture-device device.irpx
+.\build\windows-msvc\Debug\iramix_audio_probe.exe --restore-device device.irpx --seconds-per-buffer 3
+```
+
+Enumeration is implemented for WASAPI only; Core Audio and JACK report it
+as unsupported. Results are in
+[`docs/phase-0/results/DEVICE_ENUMERATION_WINDOWS_2026-07-28.md`](docs/phase-0/results/DEVICE_ENUMERATION_WINDOWS_2026-07-28.md).
+
 The default build has no ASIO SDK dependency. To build the optional Windows
 ASIO Phase 0 probe, supply an external ASIO SDK 2.3 checkout:
 

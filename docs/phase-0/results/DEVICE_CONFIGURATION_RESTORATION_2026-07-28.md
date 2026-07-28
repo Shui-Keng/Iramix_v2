@@ -95,13 +95,11 @@ resolved configuration is round-trippable.
 
 It does not prove:
 
-- **that any audio device actually opens.** No backend consumes a resolved
-  configuration yet. The WASAPI, Core Audio, and JACK probes still
-  configure themselves independently, so this layer decides what *should*
-  be opened and nothing acts on it;
-- that a real enumeration populates `AvailableAudioDevice` correctly — the
-  inventory is supplied by tests, and no backend enumeration code exists
-  to produce one;
+- that audio is rendered through a resolved device. Real WASAPI
+  enumeration and session-driven device opening are since covered by
+  [`DEVICE_ENUMERATION_WINDOWS`](DEVICE_ENUMERATION_WINDOWS_2026-07-28.md),
+  which also records what still stops short of a measured callback. Core
+  Audio and JACK remain without enumeration;
 - behavior on device hot-plug, device loss during playback, or exclusive
   mode contention;
 - anything about macOS or Linux devices beyond the shared decision logic

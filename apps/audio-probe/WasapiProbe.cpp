@@ -6,11 +6,16 @@
 #include "iramix/audio/RenderPlanExecutor.hpp"
 #include "iramix/realtime/Audit.hpp"
 
+#include "iramix/persistence/ProjectStore.hpp"
+#include "iramix/persistence/SessionDocument.hpp"
+
 #include <audioclient.h>
 #include <audiosessiontypes.h>
 #include <avrt.h>
+#include <functiondiscoverykeys_devpkey.h>
 #include <ksmedia.h>
 #include <mmdeviceapi.h>
+#include <propvarutil.h>
 #include <windows.h>
 #include <wrl/client.h>
 
@@ -613,6 +618,232 @@ void requireSuccess(const HRESULT result, const char* operation) {
         && ((requested - minimum) % fundamental) == 0U;
 }
 
+[[nodiscard]] std::string narrow(const wchar_t* const text) {
+    if (text == nullptr) {
+        return {};
+    }
+    const auto required = WideCharToMultiByte(
+        CP_UTF8,
+        0,
+        text,
+        -1,
+        nullptr,
+        0,
+        nullptr,
+        nullptr
+    );
+    if (required <= 1) {
+        return {};
+    }
+    std::string result(static_cast<std::size_t>(required - 1), '\0');
+    if (WideCharToMultiByte(
+            CP_UTF8,
+            0,
+            text,
+            -1,
+            result.data(),
+            required,
+            nullptr,
+            nullptr
+        ) == 0) {
+        return {};
+    }
+    return result;
+}
+
+struct CoTaskString final {
+    LPWSTR value {nullptr};
+
+    ~CoTaskString() {
+        if (value != nullptr) {
+            CoTaskMemFree(value);
+        }
+    }
+};
+
+struct PropVariant final {
+    PROPVARIANT value {};
+
+    PropVariant() {
+        PropVariantInit(&value);
+    }
+
+    ~PropVariant() {
+        static_cast<void>(PropVariantClear(&value));
+    }
+};
+
+// Shared mode only ever runs at the engine mix rate, so that rate is
+// always reported. Every other candidate is reported only if the device
+// accepts it in exclusive mode, which is what the probe would fall back
+// to. Rates are not guessed from the device name or class.
+[[nodiscard]] std::vector<std::uint32_t> supportedSampleRates(
+    IAudioClient* const client,
+    const std::uint32_t mixRate,
+    const std::uint16_t channels
+) {
+    std::vector<std::uint32_t> rates;
+    if (mixRate != 0U) {
+        rates.push_back(mixRate);
+    }
+    for (const auto candidate : std::array {
+             44'100U, 48'000U, 88'200U, 96'000U, 176'400U, 192'000U,
+         }) {
+        if (std::find(rates.begin(), rates.end(), candidate)
+            != rates.end()) {
+            continue;
+        }
+        WAVEFORMATEXTENSIBLE probe {};
+        probe.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+        probe.Format.nChannels = channels;
+        probe.Format.nSamplesPerSec = candidate;
+        probe.Format.wBitsPerSample = 32U;
+        probe.Format.nBlockAlign = static_cast<WORD>(
+            channels * sizeof(float)
+        );
+        probe.Format.nAvgBytesPerSec =
+            probe.Format.nBlockAlign * candidate;
+        probe.Format.cbSize =
+            sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
+        probe.Samples.wValidBitsPerSample = 32U;
+        probe.dwChannelMask = channels == 2U
+            ? (SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT)
+            : 0U;
+        probe.SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+        if (client->IsFormatSupported(
+                AUDCLNT_SHAREMODE_EXCLUSIVE,
+                &probe.Format,
+                nullptr
+            ) == S_OK) {
+            rates.push_back(candidate);
+        }
+    }
+    std::sort(rates.begin(), rates.end());
+    return rates;
+}
+
+void describeEndpoint(
+    IMMDevice* const device,
+    const persistence::SessionAudioBackend backend,
+    const bool capture,
+    std::vector<persistence::AvailableAudioDevice>& devices
+) {
+    CoTaskString id;
+    if (FAILED(device->GetId(&id.value)) || id.value == nullptr) {
+        return;
+    }
+
+    persistence::AvailableAudioDevice entry;
+    entry.backend = backend;
+    entry.deviceId = narrow(id.value);
+    if (entry.deviceId.empty()) {
+        return;
+    }
+
+    ComPtr<IPropertyStore> properties;
+    if (SUCCEEDED(device->OpenPropertyStore(STGM_READ, &properties))) {
+        PropVariant name;
+        if (SUCCEEDED(
+                properties->GetValue(
+                    PKEY_Device_FriendlyName,
+                    &name.value
+                )
+            )
+            && name.value.vt == VT_LPWSTR) {
+            entry.name = narrow(name.value.pwszVal);
+        }
+    }
+
+    ComPtr<IAudioClient3> client;
+    if (FAILED(
+            device->Activate(
+                __uuidof(IAudioClient3),
+                CLSCTX_ALL,
+                nullptr,
+                &client
+            )
+        )) {
+        // An endpoint that will not activate cannot be opened later
+        // either, so it is left out rather than advertised as usable.
+        return;
+    }
+
+    CoTaskString unusedFormat;
+    WAVEFORMATEX* mix = nullptr;
+    if (FAILED(client->GetMixFormat(&mix)) || mix == nullptr) {
+        return;
+    }
+    const auto channels = mix->nChannels;
+    const auto mixRate =
+        static_cast<std::uint32_t>(mix->nSamplesPerSec);
+
+    std::uint32_t defaultPeriod = 0U;
+    std::uint32_t fundamental = 0U;
+    std::uint32_t minimum = 0U;
+    std::uint32_t maximum = 0U;
+    if (SUCCEEDED(
+            client->GetSharedModeEnginePeriod(
+                mix,
+                &defaultPeriod,
+                &fundamental,
+                &minimum,
+                &maximum
+            )
+        )) {
+        entry.minimumBufferFrames = minimum;
+        entry.maximumBufferFrames = maximum;
+    }
+    entry.supportedSampleRates =
+        supportedSampleRates(client.Get(), mixRate, channels);
+    CoTaskMemFree(mix);
+
+    if (capture) {
+        entry.inputChannelCount = channels;
+    } else {
+        entry.outputChannelCount = channels;
+    }
+    if (entry.supportedSampleRates.empty()
+        || entry.minimumBufferFrames == 0U) {
+        // The resolver treats a device with no usable rate as
+        // unopenable; do not put one in the inventory at all.
+        return;
+    }
+    devices.push_back(std::move(entry));
+}
+
+void enumerateFlow(
+    IMMDeviceEnumerator* const enumerator,
+    const EDataFlow flow,
+    std::vector<persistence::AvailableAudioDevice>& devices
+) {
+    ComPtr<IMMDeviceCollection> collection;
+    if (FAILED(
+            enumerator->EnumAudioEndpoints(
+                flow,
+                DEVICE_STATE_ACTIVE,
+                &collection
+            )
+        )) {
+        return;
+    }
+    UINT count = 0U;
+    if (FAILED(collection->GetCount(&count))) {
+        return;
+    }
+    for (UINT index = 0U; index < count; ++index) {
+        ComPtr<IMMDevice> endpoint;
+        if (FAILED(collection->Item(index, &endpoint))) {
+            continue;
+        }
+        describeEndpoint(
+            endpoint.Get(),
+            persistence::SessionAudioBackend::wasapi,
+            flow == eCapture,
+            devices
+        );
+    }
+}
+
 ProbeResult runConfiguration(
     IMMDevice* device,
     const std::uint32_t requestedFrames,
@@ -671,10 +902,14 @@ ProbeResult runConfiguration(
     bool floatingPointOutput = true;
     if (sharedPeriodSupported) {
         result.backend = "WASAPI_shared";
+        // InitializeSharedAudioStream rejects AUDCLNT_STREAMFLAGS_NOPERSIST
+        // with AUDCLNT_E_INVALID_STREAM_FLAG, unlike the exclusive-mode
+        // Initialize below, which accepts it. Measured on this endpoint:
+        // EVENTCALLBACK alone and 0 succeed; adding NOPERSIST fails either
+        // way.
         requireSuccess(
             client->InitializeSharedAudioStream(
-                AUDCLNT_STREAMFLAGS_EVENTCALLBACK
-                    | AUDCLNT_STREAMFLAGS_NOPERSIST,
+                AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
                 requestedFrames,
                 &format.Format,
                 nullptr
@@ -1137,6 +1372,213 @@ void printResult(const ProbeResult& result) {
 }
 
 } // namespace
+
+DeviceInventory enumerateDevices() {
+    DeviceInventory inventory;
+    ComScope com;
+    if (FAILED(com.result) && com.result != RPC_E_CHANGED_MODE) {
+        inventory.error = "CoInitializeEx failed";
+        return inventory;
+    }
+    ComPtr<IMMDeviceEnumerator> enumerator;
+    if (FAILED(
+            CoCreateInstance(
+                __uuidof(MMDeviceEnumerator),
+                nullptr,
+                CLSCTX_ALL,
+                IID_PPV_ARGS(&enumerator)
+            )
+        )) {
+        inventory.error = "cannot create MMDeviceEnumerator";
+        return inventory;
+    }
+    inventory.supported = true;
+
+    // The resolver treats the first entry on a backend as that backend's
+    // default, so the default render endpoint must come first.
+    ComPtr<IMMDevice> defaultRender;
+    if (SUCCEEDED(
+            enumerator->GetDefaultAudioEndpoint(
+                eRender,
+                eConsole,
+                &defaultRender
+            )
+        )) {
+        describeEndpoint(
+            defaultRender.Get(),
+            persistence::SessionAudioBackend::wasapi,
+            false,
+            inventory.devices
+        );
+    }
+
+    std::vector<persistence::AvailableAudioDevice> remaining;
+    enumerateFlow(enumerator.Get(), eRender, remaining);
+    enumerateFlow(enumerator.Get(), eCapture, remaining);
+    for (auto& device : remaining) {
+        const auto duplicate = std::any_of(
+            inventory.devices.begin(),
+            inventory.devices.end(),
+            [&device](const persistence::AvailableAudioDevice& other) {
+                return other.deviceId == device.deviceId;
+            }
+        );
+        if (!duplicate) {
+            inventory.devices.push_back(std::move(device));
+        }
+    }
+    return inventory;
+}
+
+namespace {
+
+[[nodiscard]] std::wstring widen(const std::string& text) {
+    if (text.empty()) {
+        return {};
+    }
+    const auto required = MultiByteToWideChar(
+        CP_UTF8,
+        0,
+        text.data(),
+        static_cast<int>(text.size()),
+        nullptr,
+        0
+    );
+    if (required <= 0) {
+        return {};
+    }
+    std::wstring result(static_cast<std::size_t>(required), L'\0');
+    if (MultiByteToWideChar(
+            CP_UTF8,
+            0,
+            text.data(),
+            static_cast<int>(text.size()),
+            result.data(),
+            required
+        ) == 0) {
+        return {};
+    }
+    return result;
+}
+
+[[nodiscard]] const char* statusText(
+    const persistence::DeviceResolutionStatus status
+) noexcept {
+    switch (status) {
+    case persistence::DeviceResolutionStatus::restored:
+        return "restored";
+    case persistence::DeviceResolutionStatus::adjusted:
+        return "adjusted";
+    case persistence::DeviceResolutionStatus::substituted:
+        return "substituted";
+    case persistence::DeviceResolutionStatus::unavailableBackend:
+        return "unavailable_backend";
+    case persistence::DeviceResolutionStatus::unconfigured:
+        return "unconfigured";
+    }
+    return "unknown";
+}
+
+} // namespace
+
+int runRestoredDevice(
+    const std::filesystem::path& project,
+    const std::uint32_t secondsPerBuffer
+) {
+    const auto loaded = persistence::loadProjectSnapshot(project);
+    if (!loaded.ok) {
+        std::cerr << "Cannot open project: " << loaded.error << "\n";
+        return 7;
+    }
+    const auto decoded =
+        persistence::deserializeSessionDocument(loaded.payload);
+    if (!decoded.ok()) {
+        std::cerr << "Cannot decode session: " << decoded.error << "\n";
+        return 7;
+    }
+
+    ComScope com;
+    if (FAILED(com.result) && com.result != RPC_E_CHANGED_MODE) {
+        std::cerr << "CoInitializeEx failed.\n";
+        return 8;
+    }
+    const auto inventory = enumerateDevices();
+    if (!inventory.supported) {
+        std::cerr
+            << "Device enumeration unavailable: "
+            << inventory.error << "\n";
+        return 8;
+    }
+
+    const auto& stored = decoded.document.device;
+    const auto resolution = persistence::resolveDeviceConfiguration(
+        stored,
+        inventory.devices
+    );
+    std::cout
+        << "device_restore backend=WASAPI"
+        << " enumerated=" << inventory.devices.size()
+        << " stored_device=\"" << stored.outputDeviceId << "\""
+        << " stored_rate=" << stored.sampleRate
+        << " stored_buffer=" << stored.bufferFrames
+        << " status=" << statusText(resolution.status)
+        << " resolved_device=\""
+        << resolution.resolved.outputDeviceId << "\""
+        << " resolved_rate=" << resolution.resolved.sampleRate
+        << " resolved_buffer=" << resolution.resolved.bufferFrames
+        << " reason=\"" << resolution.reason << "\"\n";
+
+    if (!resolution.openable()) {
+        std::cerr
+            << "Session device could not be restored; refusing to "
+               "open unrelated hardware.\n";
+        return 9;
+    }
+    // The probe's graph workload is compiled for a fixed 48 kHz stereo
+    // format. Running it at a different rate would measure something the
+    // session did not ask for, so refuse rather than silently mislabel.
+    if (resolution.resolved.sampleRate != kSampleRate) {
+        std::cerr
+            << "Resolved sample rate "
+            << resolution.resolved.sampleRate
+            << " differs from the probe's fixed " << kSampleRate
+            << " Hz workload; not run.\n";
+        return 10;
+    }
+
+    ComPtr<IMMDeviceEnumerator> enumerator;
+    requireSuccess(
+        CoCreateInstance(
+            __uuidof(MMDeviceEnumerator),
+            nullptr,
+            CLSCTX_ALL,
+            IID_PPV_ARGS(&enumerator)
+        ),
+        "CoCreateInstance(MMDeviceEnumerator)"
+    );
+    ComPtr<IMMDevice> device;
+    const auto id = widen(resolution.resolved.outputDeviceId);
+    requireSuccess(
+        enumerator->GetDevice(id.c_str(), &device),
+        "IMMDeviceEnumerator::GetDevice"
+    );
+
+    try {
+        const auto result = runConfiguration(
+            device.Get(),
+            resolution.resolved.bufferFrames,
+            secondsPerBuffer
+        );
+        printResult(result);
+        return result.supported ? 0 : 4;
+    } catch (const std::exception& exception) {
+        std::cout
+            << "buffer=" << resolution.resolved.bufferFrames
+            << " status=error message=\"" << exception.what()
+            << "\"\n" << std::flush;
+        return 4;
+    }
+}
 
 int run(const std::uint32_t secondsPerBuffer) {
     ComScope com;
