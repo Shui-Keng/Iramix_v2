@@ -130,6 +130,13 @@ is stored and round-trips intact, but consuming it means starting a plugin
 host, which is exactly this task's boundary. Implementing it under P0-012
 would only have produced another layer that nothing consumes.
 
+The restoration exit item now has evidence in
+[`results/PLUGIN_STATE_RESTORATION_2026-07-28.md`](results/PLUGIN_STATE_RESTORATION_2026-07-28.md):
+a blob authored into a session, serialized, decoded, and restored into the
+live hosted plugin, with the restored coefficient observable in rendered
+audio and the plugin's state captured back byte for byte. The plugin is a
+stand-in, not a real CLAP or VST3.
+
 ## Week 8: Review and Phase 1 commitment
 
 - Run all benchmarks on reference hardware.
@@ -154,7 +161,7 @@ would only have produced another layer that nothing consumes.
 | P0-010 | Dependency/license inventory | Inventory separates in-build from candidates, Java licenses read from cached POMs and regenerable via `scripts/license-inventory.ps1`; C++ engine confirmed dependency-free. Four obligations open: Skiko native attribution (L-1), unverified JACK license (L-2), mutable CI action tags (L-3), annotations version skew (L-4); vulnerability inventory still unautomated |
 | P0-011 | Immutable real-time graph core | Windows production path, 5,001-publication sanitizer edit-storm, cross-block ramps, sample-rate modulation, and denormal protection verified; other backends and final soak pending |
 | P0-012 | Disk and session resilience | Native session ownership, write-ahead journal, monotonic undo/redo, replay, immutable/coalesced saves, fixed-window autosave, shutdown flush, revision-gated history compaction, revisioned backup rotation/retention, fail-closed automatic restore, and durable journal baselines verified locally and on three-OS CI/Java/sanitizers; and schema v4 media references, MIDI, device configuration, and plugin state verified locally and on three-OS CI/Java/sanitizers; media relink/restoration verified locally and on three-OS CI/sanitizers; device-configuration restoration decided and verified locally and on three-OS CI/sanitizers, with real WASAPI enumeration selecting a session's stored endpoint on Windows hardware and the audio callback measured on it at zero target/deadline misses (macOS/Linux enumeration absent); plugin state restoration moved to P0-013; macOS/Linux reference-hardware benchmarks accepted as out of scope for Phase 0 (R-13) |
-| P0-013 | Plugin process isolation | Bridge slice done: shared-memory transport, bounded deadline degrading to silence, host survives child crash and hang, bridge overhead p99 19.1 us, orphan watchdog verified. No plugin SDK involved. Scanning, editor embedding, control transport, and plugin state restoration (moved from P0-012) still pending |
+| P0-013 | Plugin process isolation | Bridge slice done: shared-memory transport, bounded deadline degrading to silence, host survives child crash and hang, bridge overhead p99 19.1 us, orphan watchdog verified. State slice done: a session's stored blob restores into the live plugin and is observable in rendered audio, capture round trips byte for byte through persistence, six refusal paths verified, and a capture from a crashed plugin times out at its deadline instead of stalling a save. No plugin SDK involved. Scanning, editor embedding, control transport, and wiring capture into autosave still pending |
 | P0-014 | Phase 0 exit review and Phase 1 backlog | Not started |
 
 ## Definition of done

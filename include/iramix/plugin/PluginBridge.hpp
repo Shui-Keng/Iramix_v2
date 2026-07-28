@@ -7,6 +7,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <vector>
 
 namespace iramix::plugin {
 
@@ -17,6 +18,14 @@ struct PluginBridgeConfig final {
     // plugin process. Exceeding it is a normal, counted outcome, never a
     // reason to keep waiting.
     std::chrono::microseconds deadline {0};
+    // Capacity reserved for one plugin state blob in the shared region.
+    // Zero disables state transfer entirely rather than growing on demand:
+    // the region is sized once, before any audio flows.
+    std::uint32_t maximumStateBytes {0U};
+    // Bound for restore and capture, which run on the control thread and so
+    // may wait far longer than a block. Still bounded: a plugin that will
+    // not answer must not stall a save or a project load.
+    std::chrono::milliseconds stateDeadline {250};
 };
 
 enum class PluginBlockStatus : std::uint32_t {
@@ -32,11 +41,31 @@ enum class PluginBlockStatus : std::uint32_t {
     invalidBlock = 5U,
 };
 
+enum class PluginStateStatus : std::uint32_t {
+    // The plugin accepted the blob, or produced one.
+    ok = 1U,
+    // The plugin examined the blob and refused it. Its previous state is
+    // still in force — a rejected restore never leaves a half-loaded
+    // plugin.
+    rejectedByPlugin = 2U,
+    // The blob does not fit the capacity the region was sized for.
+    tooLarge = 3U,
+    // The plugin did not answer within stateDeadline.
+    timedOut = 4U,
+    // The bridge is not started, has been stopped, or was configured
+    // without a state region.
+    unavailable = 5U,
+};
+
 struct PluginBridgeCounters final {
     std::uint64_t processedBlocks {0U};
     std::uint64_t deadlineMisses {0U};
     std::uint64_t exitedBlocks {0U};
     std::uint64_t consecutiveDeadlineMisses {0U};
+    std::uint64_t stateRestores {0U};
+    std::uint64_t stateCaptures {0U};
+    std::uint64_t stateRejections {0U};
+    std::uint64_t stateTimeouts {0U};
 };
 
 // Runs plugin audio in a separate process over shared memory.
@@ -75,6 +104,22 @@ public:
         std::uint32_t frameCount
     ) noexcept;
 
+    // Hands a session's stored state blob to the live plugin. Control
+    // thread only: it allocates nothing but it does wait, so calling it
+    // from the audio callback would defeat the whole bridge. The plugin
+    // applies the blob between blocks, never during one, so audio is never
+    // rendered against half-restored state.
+    [[nodiscard]] PluginStateStatus restoreState(
+        std::span<const std::byte> state
+    );
+
+    // Reads the live plugin's current state back for saving. Control thread
+    // only, and bounded by stateDeadline so a stuck plugin delays a save
+    // instead of blocking it forever (R-12).
+    [[nodiscard]] PluginStateStatus captureState(
+        std::vector<std::byte>& state
+    );
+
     [[nodiscard]] PluginBridgeCounters counters() const noexcept;
     [[nodiscard]] bool childRunning() const noexcept;
     [[nodiscard]] std::string sharedMemoryName() const;
@@ -91,5 +136,25 @@ private:
     explicit PluginBridge(std::unique_ptr<Impl> impl);
     std::unique_ptr<Impl> impl_;
 };
+
+// State format of the stand-in plugin the child hosts. A real plugin's blob
+// is opaque to the host and stays that way; this one is documented and
+// inspectable purely so a test can prove a restored value actually reached
+// the DSP rather than merely being copied across the boundary.
+namespace stub {
+
+[[nodiscard]] std::vector<std::byte> encodeState(
+    float gain,
+    std::span<const std::byte> payload
+);
+
+// Returns false when the blob fails its magic or checksum check — the same
+// decision the child makes before applying it.
+[[nodiscard]] bool decodeStateGain(
+    std::span<const std::byte> state,
+    float& gain
+) noexcept;
+
+} // namespace stub
 
 } // namespace iramix::plugin
