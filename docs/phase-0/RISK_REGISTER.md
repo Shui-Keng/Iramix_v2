@@ -6,7 +6,7 @@ Scoring: probability and impact range from 1 to 5. Priority is their product.
 |---|---|---:|---:|---:|---|
 | R-01 | Scope exceeds available team capacity | 5 | 5 | 25 | Enforce the v1 scope contract and validate team size |
 | R-02 | Plugin crash or hang destabilizes audio | 4 | 5 | 20 | Bounded-deadline shared-memory bridge measured: host survives child crash and hang, degrading to counted silence. See `results/PLUGIN_PROCESS_ISOLATION_2026-07-28.md`. Isolation and real VST3 hosting are now joined: the bridge child can host a real plugin (`results/VST3_HOSTING_IN_BRIDGE_CHILD_2026-07-29.md`), three third-party plugins verified, 532/532 blocks each. That work added a third reason for isolation beyond crash and hang: a Pure Data based plugin writes its banner to **stdout**, which is the transport P0-007 uses for the Java/C++ boundary, so an in-process plugin would corrupt the protocol rather than crash it. Crash/hang recovery is now also proven against real plugins: `results/VST3_CRASH_HANG_RECOVERY_2026-07-29.md` injects the same fault after three genuine blocks of real DSP, against two third-party plugins, both fault kinds. `testPluginProcessTermination`/`testPluginProcessHang` still cover the stand-in only in `ctest`, since the real-plugin variant depends on a locally installed plugin no CI runner has |
-| R-03 | Skiko/Skia GPU behavior differs substantially by OS | 4 | 4 | 16 | Run one renderer and device-loss spike per OS. **Partially open.** Slice 1 (`results/SKIA_GPU_BACKEND_FRAMETIME_2026-07-29.md`) landed a backend matrix across all three CI OSes: Direct3D on Windows, Metal on macOS, and Skiko's software fallback under Xvfb on Ubuntu CI. The Windows reference-machine median sits at the 60 Hz budget line (16.6ms) and misses 120 Hz; p99 widens from 28ms isolated to 67ms under `gradle check`. Slice 2 (`results/SKIA_GPU_RESIZE_MONITOR_RECOVERY_2026-07-29.md`) covers resize locally and in hosted CI: a continuously rendering window completed nine sizes/eight transitions with no crash, exception, timeout, or hang on Direct3D, Metal, and Ubuntu/Xvfb software. **Monitor movement is not done:** every available environment exposes one `GraphicsDevice`, and the task reports `LIMITATION_SINGLE_MONITOR`. Slice 3 (`results/SKIA_GPU_CONTEXT_RECREATION_PROXY_2026-07-29.md`) disposes/reinitializes the same SkiaLayer backend five times locally and in hosted CI; every replacement context initializes and resumes completed presents on Direct3D, Metal, and Ubuntu/Xvfb software. It is explicitly a `CONTEXT_RECREATE_PROXY`. **Literal OS sleep/wake is accepted as a Phase 0 evidence gap**, because safely suspending and resuming the host cannot be automated by a normal CI/test process; see "Literal sleep/wake coverage gap." A real Linux GPU backend, cross-monitor/mixed-DPI recovery, and device loss are still unmeasured |
+| R-03 | Skiko/Skia GPU behavior differs substantially by OS | 4 | 4 | 16 | Run one renderer and device-loss spike per OS. **Partially open.** Slice 1 (`results/SKIA_GPU_BACKEND_FRAMETIME_2026-07-29.md`) landed a backend matrix across all three CI OSes: Direct3D on Windows, Metal on macOS, and Skiko's software fallback under Xvfb on Ubuntu CI. The Windows reference-machine median sits at the 60 Hz budget line (16.6ms) and misses 120 Hz; p99 widens from 28ms isolated to 67ms under `gradle check`. Slice 2 (`results/SKIA_GPU_RESIZE_MONITOR_RECOVERY_2026-07-29.md`) covers resize locally and in hosted CI: a continuously rendering window completed nine sizes/eight transitions with no crash, exception, timeout, or hang on Direct3D, Metal, and Ubuntu/Xvfb software. **Monitor movement is not done:** every available environment exposes one `GraphicsDevice`, and the task reports `LIMITATION_SINGLE_MONITOR`. Slice 3 (`results/SKIA_GPU_CONTEXT_RECREATION_PROXY_2026-07-29.md`) disposes/reinitializes the same SkiaLayer backend five times locally and in hosted CI; every replacement context initializes and resumes completed presents on Direct3D, Metal, and Ubuntu/Xvfb software. It is explicitly a `CONTEXT_RECREATE_PROXY`. **Literal OS sleep/wake is accepted as a Phase 0 evidence gap**, because safely suspending and resuming the host cannot be automated by a normal CI/test process; see "Literal sleep/wake coverage gap." Slice 4 (`results/SKIA_GPU_DEVICE_LOSS_ERROR_PATH_PROXY_2026-07-29.md`) safely injects one managed `RenderException` into Skiko's real draw-scope recovery handler locally and in hosted CI: Direct3D, Metal, and Ubuntu/Xvfb Software Fast all leave the failed backend, initialize a fallback context, and resume completed presents. It is explicitly a `SKIKO_RENDER_EXCEPTION_FALLBACK_PROXY`; the selected fallback varies by environment. **Native surface-allocation failure and literal device loss/TDR are accepted Phase 0 evidence gaps**, because pinned Skiko exposes no safe allocation fault seam and forcing either event can destabilize the only development machine; see "GPU device-loss coverage gaps." A real Linux GPU backend and cross-monitor/mixed-DPI recovery remain unmeasured |
 | R-04 | Linux plugin editors fail under Wayland | 4 | 4 | 16 | **Cannot be closed in Phase 0: no Linux hardware (see R-13).** Native Wayland has no cross-client reparenting mechanism at all, so the generic-editor fallback is a requirement rather than a contingency. See `results/PLUGIN_EDITOR_EMBEDDING_RISK_2026-07-29.md` |
 | R-05 | Multicore graph scheduling misses deadlines | 3 | 5 | 15 | Stabilize single coordinator first; benchmark graph partitions |
 | R-06 | Project corruption destroys user work | 2 | 5 | 10 | Journaled commands, atomic saves, and forced-crash drills |
@@ -87,6 +87,36 @@ an out-of-band wake mechanism and logging that survives the interruption.
 That manual hardware exercise is deferred beyond automated Phase 0
 gating. This acceptance does not cover device loss, monitor movement, or
 mixed-DPI recovery; those retain their own evidence boundaries.
+
+## GPU device-loss coverage gaps
+
+**Status: accepted as Phase 0 evidence gaps on 2026-07-29.**
+
+Pinned Skiko 0.150.1 crosses directly from its Direct3D context handler
+into private native surface and swap-chain operations. It exposes no
+public fault-injection seam for making `makeDirectXSurface` fail.
+Allocation pressure, extreme dimensions, native-handle mutation, adapter
+removal, driver reset, and TDR cannot be made safe, isolated, and
+observable on the only available development machine or an ordinary
+hosted CI runner.
+
+### Accepted position
+
+Phase 0 exercises the managed recovery handler with one controlled
+`RenderException` inside Skiko's draw scope. The task requires a
+different backend context and completed presents after fallback, and
+labels the result `SKIKO_RENDER_EXCEPTION_FALLBACK_PROXY`.
+
+This is useful error-path evidence, but it is not reported as native
+surface-allocation failure or literal device loss. Both remain
+`ACCEPTED_EVIDENCE_GAP`; see
+`results/SKIA_GPU_DEVICE_LOSS_ERROR_PATH_PROXY_2026-07-29.md`.
+
+Closing the native-allocation gap requires an upstream Skiko/native
+fault-injection seam or a disposable GPU host. Closing literal
+device-loss/TDR requires a dedicated Windows GPU machine with
+out-of-band observability and a recovery runbook. Neither gap may be
+closed by relabeling the managed-exception proxy.
 
 ## ASIO administrative and trademark note
 
