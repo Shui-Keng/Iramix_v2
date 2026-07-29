@@ -2,11 +2,11 @@
 
 ## Result
 
-**The safe error-path proxy passes on the Windows reference machine.**
-One `RenderException` injected inside Skiko's draw scope caused the
-active backend to change from Direct3D to OpenGL. Skiko initialized a
-replacement context and the harness observed completed presents from
-that replacement context.
+**The safe error-path proxy passes on the Windows reference machine and
+all three hosted CI operating systems.** One `RenderException` injected
+inside Skiko's draw scope caused every environment to leave its active
+backend. Skiko initialized a replacement context and the harness
+observed completed presents from that replacement context.
 
 This result is deliberately narrower than native surface-allocation
 failure and much narrower than real device loss. The task reports:
@@ -95,8 +95,35 @@ and produced completed backend presents after the controlled error.
 GPU context-recreation task. It needs a display; Linux CI therefore runs
 it under Xvfb like the other GPU tasks.
 
-Hosted runner results are not recorded until the branch has actually
-run in CI.
+Push run
+[`30446522421`](https://github.com/Shui-Keng/Iramix_v2/actions/runs/30446522421)
+completed all five jobs successfully:
+
+| Environment | Initial backend | Recovered backend | Injected failures | Context initializations | Completed presents |
+|---|---|---|---:|---:|---:|
+| Ubuntu/Xvfb x64 | Software Fast | Software Compat | 1 | 1 | 4 |
+| Windows 2022 x64 | Direct3D | Software Fast | 1 | 2 | 6 |
+| macOS arm64 | Metal | Software Compat | 1 | 1 | 4 |
+
+Exact task output:
+
+```text
+GPU device-loss proxy: target=linux-x64 initialBackend=SOFTWARE_FAST recoveredBackend=SOFTWARE_COMPAT injectedFailures=1 contextInitializations=1 renderCallbacks=4 completedPresents=4 deviceLoss=SKIKO_RENDER_EXCEPTION_FALLBACK_PROXY nativeSurfaceFailure=ACCEPTED_EVIDENCE_GAP literalTdr=ACCEPTED_EVIDENCE_GAP
+GPU device-loss proxy: target=windows-x64 initialBackend=DIRECT3D recoveredBackend=SOFTWARE_FAST injectedFailures=1 contextInitializations=2 renderCallbacks=6 completedPresents=6 deviceLoss=SKIKO_RENDER_EXCEPTION_FALLBACK_PROXY nativeSurfaceFailure=ACCEPTED_EVIDENCE_GAP literalTdr=ACCEPTED_EVIDENCE_GAP
+GPU device-loss proxy: target=macos-arm64 initialBackend=METAL recoveredBackend=SOFTWARE_COMPAT injectedFailures=1 contextInitializations=1 renderCallbacks=4 completedPresents=4 deviceLoss=SKIKO_RENDER_EXCEPTION_FALLBACK_PROXY nativeSurfaceFailure=ACCEPTED_EVIDENCE_GAP literalTdr=ACCEPTED_EVIDENCE_GAP
+```
+
+The hosted Windows runner first initialized the OpenGL candidate, then
+logged `Failed to create Skia OpenGL context` and recovered again onto
+Software Fast. Its two context initializations are therefore evidence
+of the failed intermediate candidate plus the working software
+fallback. The harness does not require a particular fallback backend;
+it requires that the final backend differs from the failed backend and
+completes presents.
+
+The sanitizer and ThreadSanitizer jobs also passed. They cover the
+native engine suite; the Java/Skiko proxy itself runs in the three OS
+build jobs.
 
 ## Accepted evidence gaps
 
@@ -132,8 +159,8 @@ This slice proves only that:
 
 - the pinned Skiko error handler observes a controlled
   `RenderException`;
-- it disposes the active Direct3D path and selects an available fallback
-  on the Windows reference machine;
+- it disposes the active backend and selects an available fallback on
+  the Windows reference machine and all three hosted CI environments;
 - the fallback creates a distinguishable context; and
 - rendering and completed presents resume on that context.
 

@@ -119,11 +119,13 @@ Exit evidence:
   and Ubuntu/Xvfb software. This is explicitly
   `CONTEXT_RECREATE_PROXY`; literal OS sleep/wake is an
   `ACCEPTED_EVIDENCE_GAP` for Phase 0, not claimed done. Device-loss
-  error-path proxy done on the Windows reference machine
+  error-path proxy done on the Windows reference machine and all three
+  hosted CI operating systems
   ([`results/SKIA_GPU_DEVICE_LOSS_ERROR_PATH_PROXY_2026-07-29.md`](results/SKIA_GPU_DEVICE_LOSS_ERROR_PATH_PROXY_2026-07-29.md)):
-  one managed `RenderException` in Skiko's draw scope moves Direct3D to
-  OpenGL, initializes a replacement context, and resumes completed
-  presents. It is explicitly a
+  one managed `RenderException` in Skiko's draw scope makes Direct3D,
+  Metal, and Ubuntu/Xvfb Software Fast select an available fallback,
+  initialize a replacement context, and resume completed presents. The
+  fallback backend varies by environment. It is explicitly a
   `SKIKO_RENDER_EXCEPTION_FALLBACK_PROXY`; native surface-allocation
   failure and literal device loss/TDR are accepted evidence gaps, not
   claimed by the proxy.
@@ -147,7 +149,8 @@ Exit evidence:
   measured locally and completes on hosted Direct3D, Metal, and
   Ubuntu/Xvfb software as a sleep/wake proxy, literal OS sleep/wake is
   an accepted gap; the device-loss error handler has a managed
-  `RenderException` fallback proxy on the Windows reference machine,
+  `RenderException` fallback proxy locally and in all three hosted CI
+  operating systems,
   while native surface-allocation failure and literal TDR are accepted
   gaps;
 - accepted backend matrix or a documented fallback — done: Direct3D
