@@ -144,19 +144,49 @@ Ubuntu runner and record the actual SPDX identifiers, then confirm the
 link is dynamic. Until then, treat Linux JACK as spike-only, which it
 currently is.
 
-**Instrumented 2026-07-29; still open pending the first log.** The Ubuntu
-CI job gained a "Record JACK licence and link type" step that prints the
-installed package versions, the `License:` lines from the Debian
-copyright file, `pkg-config --libs jack`, and which library files the
-packages ship (`.so` versus `.a`). The step **prints rather than
-asserts**: an upstream relicence should surface as a visible diff in the
-log, not as a red build that no one here can reproduce without a Linux
-machine (R-13).
+**Closed 2026-07-29 with measured evidence.** The Ubuntu CI job gained a
+"Record JACK licence and link type" step, and its output replaces the
+upstream reputation the paragraph above rested on. Read from
+`ubuntu-latest`, packages `libjack-jackd2-0` and `libjack-jackd2-dev`
+version `1.9.21~dfsg-3ubuntu3`:
 
-This closes the "cannot be verified from this machine" half. It does not
-close L-2 — that needs a human to read the first log and paste the actual
-SPDX identifiers and link type into this entry, replacing the upstream
-reputation the paragraph above still rests on.
+```text
+--- copyright stanzas governing the client library ---
+Files: * => License: LGPL-2.1+
+Files: common/JackAudioDriver.cpp => License: GPL-2~or
+Files: tools/zalsa/* => License: GPL-3+
+
+--- pkg-config link flags ---
+-ljack
+
+--- library files shipped (.so = dynamic, .a = static) ---
+/usr/lib/x86_64-linux-gnu/libjack.so
+/usr/lib/x86_64-linux-gnu/libjack.so.0
+```
+
+Three findings, in order of how much they settle:
+
+1. **Static linking is impossible, not merely discouraged.** The packages
+   ship `libjack.so` and `libjack.so.0` and **no `.a` at all**. The
+   policy violation this entry worried about cannot be committed through
+   these packages even by accident.
+2. **The client library is LGPL-2.1+.** The blanket `Files: *` stanza
+   governs it. The GPL entries that appear in a naive licence listing
+   apply to one server source file and to the `zalsa` tools, neither of
+   which is linked here — which is exactly why the sorted `License:`
+   lines alone were not enough, and the step pairs each `Files:` glob
+   with its licence.
+3. `pkg-config --libs jack` emits `-ljack` with no `-static`.
+
+Dynamic linking against an LGPL-2.1+ client library satisfies "no GPL
+dependency in a closed-source path". Linux JACK no longer needs to be
+treated as spike-only on licensing grounds; it remains a spike for the
+unrelated reason that no Linux hardware exists to run it on (R-13).
+
+The step **prints rather than asserts**, deliberately: an upstream
+relicence should surface as a visible diff in a log, not as a red build
+that no one here could reproduce or diagnose without a Linux machine.
+Re-read it on any distribution or JACK version bump.
 
 ### L-3 — CI actions are pinned to mutable tags
 
