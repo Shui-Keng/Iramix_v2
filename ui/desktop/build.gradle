@@ -130,6 +130,16 @@ tasks.register("gpuContextRecoverySpike", JavaExec) {
     environment "IRAMIX_SKIKO_TARGET", skikoTarget
 }
 
+tasks.register("gpuDeviceLossProxySpike", JavaExec) {
+    group = "verification"
+    description = "Injects a safe Skiko RenderException and verifies " +
+        "fallback context/presents as a device-loss error-path proxy; " +
+        "it does not force native surface failure or TDR."
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = "com.iramix.ui.tools.GpuDeviceLossProxySpike"
+    environment "IRAMIX_SKIKO_TARGET", skikoTarget
+}
+
 tasks.named("ipcLoadTest") {
     mustRunAfter("architectureSmoke")
 }
@@ -142,6 +152,10 @@ tasks.named("gpuContextRecoverySpike") {
     mustRunAfter("gpuRecoverySpike")
 }
 
+tasks.named("gpuDeviceLossProxySpike") {
+    mustRunAfter("gpuContextRecoverySpike")
+}
+
 tasks.named("check") {
     dependsOn(
         "architectureSmoke",
@@ -149,7 +163,8 @@ tasks.named("check") {
         "rasterSpike",
         "gpuSpike",
         "gpuRecoverySpike",
-        "gpuContextRecoverySpike"
+        "gpuContextRecoverySpike",
+        "gpuDeviceLossProxySpike"
     )
 }
 
