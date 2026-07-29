@@ -1,9 +1,11 @@
 # Skia GPU Resize and Monitor-Move Recovery — 2026-07-29
 
 Status: P0-005 Week 4 slice 2 (R-03). Resize recovery has measured
-Windows evidence. Monitor-move recovery does not: the development machine
-exposes only one AWT graphics device, so that half of the slice remains a
-declared hardware limitation rather than being marked done.
+Windows reference-machine evidence and completion evidence on all three
+hosted CI operating systems. Monitor-move recovery does not: every
+available environment exposes only one AWT graphics device, so that half
+of the slice remains a declared hardware limitation rather than being
+marked done.
 
 ## Scope
 
@@ -41,8 +43,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\gradle.ps1 :ui:desktop:gpuRec
 ```
 
 `gpuRecoverySpike` is also wired into `gradle check` after `gpuSpike`.
-The task will therefore run on the existing Windows/macOS/Linux CI
-matrix; this document does not claim those new CI runs have happened yet.
+It ran on the existing Windows/macOS/Linux CI matrix in Actions run
+`30437157388`.
 
 ## Local result
 
@@ -77,9 +79,27 @@ three per stage because the loop remains live and Skiko may schedule an
 additional frame around a resize; the invariant is the completed
 per-stage minimum, not an exact global callback count.
 
+## Hosted three-OS result
+
+All five jobs in Actions run `30437157388` completed successfully:
+Windows, macOS, Ubuntu/Xvfb, ASan+UBSan, and TSan. The three UI jobs
+reported:
+
+| Hosted environment | Backend | Callbacks | Completed presents | Monitor result |
+|---|---|---:|---:|---|
+| Windows 2022 | Direct3D | 46 | 45 | `LIMITATION_SINGLE_MONITOR` |
+| macOS arm64 | Metal | 57 | 30 | `LIMITATION_SINGLE_MONITOR` |
+| Ubuntu x64 under Xvfb | `SOFTWARE_FAST` | 28 | 28 | `LIMITATION_SINGLE_MONITOR` |
+
+Every leg completed the same nine stages/eight transitions at the exact
+expected dimensions, and each finished `gradle check` successfully. These
+counts are completion evidence, not performance figures: hosted hardware
+is uncontrolled, callback scheduling differs by backend, and Ubuntu's
+Xvfb path is software rather than a real Linux GPU.
+
 ## Monitor-move result: limitation, not completion
 
-The JVM reported:
+The local JVM reported:
 
 ```text
 monitorCount=1 monitorVisited=0 monitorPresents=0
@@ -92,6 +112,10 @@ monitor transition, graphics-configuration replacement, cross-monitor
 content scale, or adapter recovery. The harness deliberately does not do
 that and call it success.
 
+All three hosted UI jobs also reported `monitorCount=1`. Hosted CI
+therefore adds cross-platform resize coverage, but no cross-monitor
+coverage.
+
 When two or more devices are available, the same task centers the live
 window on every device, verifies that the frame's observed
 `GraphicsDevice` ID changed to the requested device, recalculates the
@@ -101,23 +125,24 @@ completed backend presents there. Only that path prints
 
 ## Evidence boundary
 
-This proves continuous dense-scene rendering and completed Direct3D
-presents across eight real `JFrame` size transitions on one Windows
-machine. It also proves the automated task fails on a per-stage 10-second
-deadline rather than hanging indefinitely.
+This proves continuous dense-scene rendering across eight real `JFrame`
+size transitions on the Windows Direct3D reference machine and in hosted
+Windows Direct3D, macOS Metal, and Ubuntu/Xvfb software environments. It
+also proves the automated task fails on a per-stage 10-second deadline
+rather than hanging indefinitely.
 
 It does not prove:
 
 - **monitor-move recovery.** Only one `GraphicsDevice` exists on the
   development machine, so no cross-monitor movement happened. The output
   says `LIMITATION_SINGLE_MONITOR`; this item remains open;
-- **HiDPI or mixed-DPI behavior.** Every local observation reported
-  `@1.00`. Physical and logical dimensions matching is evidence of the
-  absence of scaling here, not evidence that scaling works (R-07);
-- **recovery on macOS Metal, Linux OpenGL, or Linux's CI software
-  fallback.** The task is in the three-OS `check` graph, but this result
-  records only the local Windows Direct3D run. CI must run before those
-  paths can be claimed;
+- **HiDPI or mixed-DPI behavior.** Every local and hosted observation
+  reported `@1.00`. Physical and logical dimensions matching is evidence
+  of the absence of scaling in these runs, not evidence that scaling
+  works (R-07);
+- **recovery on a real Linux GPU.** Ubuntu completed through Skiko's
+  `SOFTWARE_FAST` fallback under Xvfb. No `LinuxOpenGLRedrawer` path ran
+  on actual GPU hardware;
 - **native surface object identity.** The public Skiko API exposes
   completed backend-frame analytics but not its internal `Surface`
   pointer. The evidence is successful backend draw/present after each
