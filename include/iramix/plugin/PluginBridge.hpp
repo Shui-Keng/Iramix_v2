@@ -134,6 +134,20 @@ public:
         std::string& error
     );
 
+    // Launches the child in real-plugin mode: the child loads
+    // vst3ModulePath itself and every block runs through that plugin's own
+    // DSP rather than the stand-in. Failure to open the plugin surfaces as
+    // an ordinary exited child — processBlock() degrades to silence exactly
+    // as it does for a crash, because from the host's side the two look
+    // identical.
+    [[nodiscard]] bool startVst3(
+        const std::filesystem::path& childExecutable,
+        const std::filesystem::path& vst3ModulePath,
+        std::uint32_t vst3ClassIndex,
+        double sampleRate,
+        std::string& error
+    );
+
     void stop() noexcept;
 
     // Audio-callback entry point. Performs no allocation, acquires no lock,
@@ -182,15 +196,25 @@ public:
     [[nodiscard]] std::string sharedMemoryName() const;
 
     // Child-process entry point. Attaches to the named shared memory and
-    // services blocks until asked to stop.
+    // services blocks until asked to stop. mode == "vst3" loads
+    // vst3ModulePath itself (see startVst3()); the other three arguments
+    // are otherwise unused.
     [[nodiscard]] static int runChild(
         const std::string& sharedMemoryName,
-        const std::string& mode
+        const std::string& mode,
+        const std::string& vst3ModulePath = std::string {},
+        std::uint32_t vst3ClassIndex = 0U,
+        double vst3SampleRate = 48'000.0
     );
 
 private:
     struct Impl;
     explicit PluginBridge(std::unique_ptr<Impl> impl);
+    [[nodiscard]] bool startWithArguments(
+        const std::filesystem::path& childExecutable,
+        const std::vector<std::string>& arguments,
+        std::string& error
+    );
     std::unique_ptr<Impl> impl_;
 };
 

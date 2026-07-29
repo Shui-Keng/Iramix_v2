@@ -1,3 +1,4 @@
+#include "iramix/plugin/PluginBridge.hpp"
 #include "iramix/plugin/PluginScanner.hpp"
 #include "iramix/plugin/Vst3Host.hpp"
 
@@ -9,6 +10,7 @@
 #include <iostream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -16,6 +18,7 @@ namespace {
 constexpr std::uint32_t kFrames = 256U;
 constexpr std::uint32_t kChannels = 2U;
 constexpr double kSampleRate = 48'000.0;
+constexpr std::uint32_t kStateCapacity = 65'536U;
 
 [[nodiscard]] std::vector<float> makeInput() {
     std::vector<float> input(
@@ -66,14 +69,58 @@ constexpr double kSampleRate = 48'000.0;
         / static_cast<double>(before.size());
 }
 
+// Drives blocks until either one is serviced or the child is confirmed
+// gone, so a plugin that failed to open in the child fails fast rather
+// than spinning through hundreds of dead attempts.
+[[nodiscard]] bool warmUp(
+    iramix::plugin::PluginBridge& bridge,
+    const std::vector<float>& input,
+    std::vector<float>& output
+) {
+    for (int attempt = 0; attempt < 400; ++attempt) {
+        if (bridge.processBlock(input, output, kFrames)
+            == iramix::plugin::PluginBlockStatus::processed) {
+            return true;
+        }
+        if (!bridge.childRunning()) {
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds {5});
+    }
+    return false;
+}
+
 } // namespace
 
 int main(const int argc, char* argv[]) {
     namespace plugin = iramix::plugin;
 
+    // Self-exec dispatch: this same binary becomes the bridge's child
+    // process. Vst3Host only ever runs on that side — the point being
+    // measured here is that hosting happens inside the isolated child
+    // rather than in this driving process, which is what distinguishes
+    // this from the earlier in-process probe.
+    if (argc >= 4 && argc <= 7
+        && std::string_view {argv[1]} == "--plugin-bridge-child") {
+        const std::string vst3ModulePath = argc >= 5 ? argv[4] : "";
+        const auto vst3ClassIndex = argc >= 6
+            ? static_cast<std::uint32_t>(std::atoi(argv[5]))
+            : 0U;
+        const double vst3SampleRate = argc >= 7
+            ? std::atof(argv[6])
+            : kSampleRate;
+        return plugin::PluginBridge::runChild(
+            argv[2],
+            argv[3],
+            vst3ModulePath,
+            vst3ClassIndex,
+            vst3SampleRate
+        );
+    }
+
     if (!plugin::Vst3Host::available()) {
         std::cout
-            << "Plugin host: available=0, "
+            << "Plugin bridge host: available=0, "
                "reason=built_without_vst3_sdk\n";
         return EXIT_SUCCESS;
     }
@@ -103,19 +150,41 @@ int main(const int argc, char* argv[]) {
         }
     }
 
-    plugin::Vst3Host host;
+    plugin::PluginBridgeConfig config {
+        .maximumFrames = kFrames,
+        .channelCount = kChannels,
+        // Generous rather than tight: this measures whether real hosting
+        // works through the bridge, not scheduler behaviour under a tight
+        // budget — that is PluginBridgeTests' healthy-path job, run
+        // against the stand-in plugin.
+        .deadline = std::chrono::milliseconds {20},
+        .maximumStateBytes = kStateCapacity,
+        .stateDeadline = std::chrono::milliseconds {250},
+        .parameterQueueCapacity = 0U,
+    };
+
     std::string error;
+    auto bridge = plugin::PluginBridge::create(config, error);
+    if (bridge == nullptr) {
+        std::cout << "Plugin bridge host: created=0, reason="
+                   << error << "\n";
+        return EXIT_FAILURE;
+    }
+
+    const auto self = std::filesystem::absolute(argv[0]);
     const auto openStarted = std::chrono::steady_clock::now();
-    if (!host.open(
-            target,
-            classIndex,
-            kFrames,
-            kChannels,
-            kSampleRate,
-            error
-        )) {
+    if (!bridge->startVst3(self, target, classIndex, kSampleRate, error)) {
+        std::cout << "Plugin bridge host: started=0, reason="
+                   << error << "\n";
+        return EXIT_FAILURE;
+    }
+
+    const auto input = makeInput();
+    std::vector<float> output(input.size(), 0.0F);
+    if (!warmUp(*bridge, input, output)) {
         std::cout
-            << "Plugin host: opened=0, reason=" << error << "\n";
+            << "Plugin bridge host: opened=0, "
+               "reason=child_exited_before_first_block\n";
         return EXIT_FAILURE;
     }
     const double openMilliseconds =
@@ -123,16 +192,16 @@ int main(const int argc, char* argv[]) {
             std::chrono::steady_clock::now() - openStarted
         ).count();
 
-    const auto input = makeInput();
-    std::vector<float> output(input.size(), 0.0F);
-
     // Steady-state processing. The first blocks are excluded from the
-    // timing because a plugin may still be building tables.
+    // timing because a plugin may still be building tables, and this
+    // round trip additionally includes the bridge's own IPC, unlike the
+    // in-process probe's timing.
     constexpr std::size_t warmUpBlocks = 32U;
     constexpr std::size_t measuredBlocks = 500U;
     std::size_t processed = 0U;
     for (std::size_t index = 0U; index < warmUpBlocks; ++index) {
-        if (host.process(input.data(), output.data(), kFrames)) {
+        if (bridge->processBlock(input, output, kFrames)
+            == plugin::PluginBlockStatus::processed) {
             ++processed;
         }
     }
@@ -141,13 +210,13 @@ int main(const int argc, char* argv[]) {
     blockMilliseconds.reserve(measuredBlocks);
     for (std::size_t index = 0U; index < measuredBlocks; ++index) {
         const auto started = std::chrono::steady_clock::now();
-        const bool ok = host.process(input.data(), output.data(), kFrames);
+        const auto status = bridge->processBlock(input, output, kFrames);
         blockMilliseconds.push_back(
             std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - started
             ).count()
         );
-        if (ok) {
+        if (status == plugin::PluginBlockStatus::processed) {
             ++processed;
         }
     }
@@ -161,17 +230,21 @@ int main(const int argc, char* argv[]) {
 
     const auto outputPeak = peak(output);
 
-    // State round trip through the plugin's own format.
+    // State round trip through the plugin's own format, driven entirely
+    // through the bridge's restoreState()/captureState() rather than
+    // calling Vst3Host directly.
     std::vector<std::byte> saved;
     const auto saveStarted = std::chrono::steady_clock::now();
-    const bool savedOk = host.saveState(saved);
+    const bool savedOk =
+        bridge->captureState(saved) == plugin::PluginStateStatus::ok;
     const double saveMilliseconds =
         std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - saveStarted
         ).count();
 
     const auto loadStarted = std::chrono::steady_clock::now();
-    const bool loadedOk = savedOk && host.loadState(saved);
+    const bool loadedOk = savedOk
+        && bridge->restoreState(saved) == plugin::PluginStateStatus::ok;
     const double loadMilliseconds =
         std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - loadStarted
@@ -180,19 +253,21 @@ int main(const int argc, char* argv[]) {
     // Audio must still flow after the state was pushed back in.
     std::fill(output.begin(), output.end(), 0.0F);
     const bool processedAfterRestore =
-        host.process(input.data(), output.data(), kFrames);
+        bridge->processBlock(input, output, kFrames)
+            == plugin::PluginBlockStatus::processed;
     const auto peakAfterRestore = peak(output);
 
     std::vector<std::byte> resaved;
     const bool stableState = savedOk
-        && host.saveState(resaved)
+        && bridge->captureState(resaved) == plugin::PluginStateStatus::ok
         && resaved == saved;
 
-    const auto& info = host.info();
+    const auto counters = bridge->counters();
+    bridge->stop();
+
     std::cout
-        << "Plugin host: name=" << info.name
-        << ", in_channels=" << info.inputChannels
-        << ", out_channels=" << info.outputChannels
+        << "Plugin bridge host: module=" << target.filename().string()
+        << ", in_bridge_child=1"
         << ", open_ms=" << openMilliseconds
         << ", blocks=" << (warmUpBlocks + measuredBlocks)
         << ", processed=" << processed
@@ -200,6 +275,7 @@ int main(const int argc, char* argv[]) {
         << ", block_p95_ms=" << percentile(0.95)
         << ", block_p99_ms=" << percentile(0.99)
         << ", block_max_ms=" << percentile(1.0)
+        << ", deadline_misses=" << counters.deadlineMisses
         << ", input_peak=" << peak(input)
         << ", output_peak=" << outputPeak
         << ", samples_changed=" << changedFraction(input, output)

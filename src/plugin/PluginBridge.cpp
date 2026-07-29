@@ -1,8 +1,10 @@
 #include "iramix/plugin/PluginBridge.hpp"
+#include "iramix/plugin/Vst3Host.hpp"
 
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <iostream>
 #include <new>
 #include <thread>
 #include <vector>
@@ -59,6 +61,39 @@ struct SharedParameterEvent final {
     }
     return result;
 }
+
+#if defined(_WIN32)
+// A VST3 module path routinely contains spaces ("Program Files"), and the
+// stub-mode arguments never needed quoting, so the original command-line
+// builder never had to handle it. Follows the same backslash/quote escaping
+// the Windows CRT uses to parse argv back out of the command line.
+[[nodiscard]] std::string quoteWindowsArgument(const std::string& argument) {
+    if (!argument.empty()
+        && argument.find_first_of(" \t\n\v\"") == std::string::npos) {
+        return argument;
+    }
+    std::string quoted = "\"";
+    std::size_t backslashes = 0U;
+    for (const char character : argument) {
+        if (character == '\\') {
+            ++backslashes;
+            continue;
+        }
+        if (character == '"') {
+            quoted.append(backslashes * 2U + 1U, '\\');
+            backslashes = 0U;
+            quoted += '"';
+            continue;
+        }
+        quoted.append(backslashes, '\\');
+        backslashes = 0U;
+        quoted += character;
+    }
+    quoted.append(backslashes * 2U, '\\');
+    quoted += '"';
+    return quoted;
+}
+#endif
 
 // Laid out for cross-process sharing: fixed-width, lock-free atomics only,
 // no pointers, no virtuals. Both processes map the same bytes.
@@ -570,9 +605,9 @@ std::unique_ptr<PluginBridge> PluginBridge::create(
     };
 }
 
-bool PluginBridge::start(
+bool PluginBridge::startWithArguments(
     const std::filesystem::path& childExecutable,
-    const std::string& childMode,
+    const std::vector<std::string>& arguments,
     std::string& error
 ) {
     error.clear();
@@ -582,9 +617,11 @@ bool PluginBridge::start(
     }
 
 #if defined(_WIN32)
-    std::string commandLine = "\"" + childExecutable.string()
-        + "\" --plugin-bridge-child \"" + impl_->name + "\" "
-        + childMode;
+    std::string commandLine = quoteWindowsArgument(childExecutable.string());
+    for (const auto& argument : arguments) {
+        commandLine += ' ';
+        commandLine += quoteWindowsArgument(argument);
+    }
     std::vector<char> mutableCommand {
         commandLine.begin(),
         commandLine.end(),
@@ -617,14 +654,18 @@ bool PluginBridge::start(
         return false;
     }
     if (child == 0) {
-        ::execl(
-            childExecutable.c_str(),
-            childExecutable.c_str(),
-            "--plugin-bridge-child",
-            impl_->name.c_str(),
-            childMode.c_str(),
-            static_cast<char*>(nullptr)
-        );
+        // execv wants a mutable argv, but never writes through it; the
+        // strings themselves stay owned by this stack frame for the
+        // process's short remaining lifetime before exec replaces it.
+        const std::string executable = childExecutable.string();
+        std::vector<std::string> storage = arguments;
+        std::vector<char*> argv;
+        argv.push_back(const_cast<char*>(executable.c_str()));
+        for (auto& argument : storage) {
+            argv.push_back(argument.data());
+        }
+        argv.push_back(nullptr);
+        ::execv(executable.c_str(), argv.data());
         ::_Exit(126);
     }
     impl_->process = child;
@@ -632,6 +673,39 @@ bool PluginBridge::start(
 
     impl_->started = true;
     return true;
+}
+
+bool PluginBridge::start(
+    const std::filesystem::path& childExecutable,
+    const std::string& childMode,
+    std::string& error
+) {
+    return startWithArguments(
+        childExecutable,
+        {"--plugin-bridge-child", impl_->name, childMode},
+        error
+    );
+}
+
+bool PluginBridge::startVst3(
+    const std::filesystem::path& childExecutable,
+    const std::filesystem::path& vst3ModulePath,
+    const std::uint32_t vst3ClassIndex,
+    const double sampleRate,
+    std::string& error
+) {
+    return startWithArguments(
+        childExecutable,
+        {
+            "--plugin-bridge-child",
+            impl_->name,
+            "vst3",
+            vst3ModulePath.string(),
+            std::to_string(vst3ClassIndex),
+            std::to_string(sampleRate),
+        },
+        error
+    );
 }
 
 void PluginBridge::stop() noexcept {
@@ -948,7 +1022,10 @@ PluginBlockStatus PluginBridge::processBlock(
 
 int PluginBridge::runChild(
     const std::string& sharedMemoryName,
-    const std::string& mode
+    const std::string& mode,
+    const std::string& vst3ModulePath,
+    const std::uint32_t vst3ClassIndex,
+    const double vst3SampleRate
 ) {
     SharedControl* control = nullptr;
     std::size_t bytes = 0U;
@@ -1078,6 +1155,40 @@ int PluginBridge::runChild(
     bool bypassed = false;
     std::vector<std::byte> payload;
 
+    // Real hosting, not the stand-in: every block runs through this
+    // plugin's own DSP and its own state format. An open failure here is
+    // reported the same way a crashed child is — by exiting before the
+    // request loop — because the host has no channel back to this process
+    // other than watching whether it kept running.
+    const bool isVst3 = mode == "vst3";
+    Vst3Host vst3Host;
+    bool vst3Opened = false;
+    if (isVst3) {
+        std::string openError;
+        vst3Opened = vst3Host.open(
+            vst3ModulePath,
+            vst3ClassIndex,
+            maximumFrames,
+            channelCount,
+            vst3SampleRate,
+            openError
+        );
+        if (!vst3Opened) {
+            std::cerr
+                << "plugin-bridge-child: vst3 open failed: "
+                << openError << "\n";
+#if defined(_WIN32)
+            CloseHandle(request);
+            UnmapViewOfFile(control);
+            CloseHandle(mapping);
+#else
+            ::sem_close(request);
+            ::munmap(control, bytes);
+#endif
+            return 30;
+        }
+    }
+
     control->childReady.store(1U, std::memory_order_release);
 
     // A plugin process must never outlive its host. The main loop blocks on
@@ -1149,46 +1260,59 @@ int PluginBridge::runChild(
                     ),
                     stateCapacity
                 );
-                float restored = 0.0F;
                 const std::span<const std::byte> incoming {blob, length};
-                if (stub::decodeStateGain(incoming, restored)
-                    && restored >= 0.0F
-                    && restored <= 4.0F) {
-                    gain = restored;
-                    payload.assign(
-                        incoming.begin() + 12,
-                        incoming.end() - 4
-                    );
-                    control->stateResult.store(
-                        kStateResultOk,
-                        std::memory_order_relaxed
-                    );
+                bool accepted = false;
+                if (isVst3) {
+                    accepted = vst3Opened
+                        && vst3Host.loadState(incoming);
                 } else {
-                    // A refused blob leaves the previous state in force.
-                    // Half-applying it would be worse than not loading it.
-                    control->stateResult.store(
-                        kStateResultRejected,
-                        std::memory_order_relaxed
-                    );
+                    float restored = 0.0F;
+                    if (stub::decodeStateGain(incoming, restored)
+                        && restored >= 0.0F
+                        && restored <= 4.0F) {
+                        gain = restored;
+                        payload.assign(
+                            incoming.begin() + 12,
+                            incoming.end() - 4
+                        );
+                        accepted = true;
+                    }
                 }
+                // A refused blob leaves the previous state in force.
+                // Half-applying it would be worse than not loading it.
+                control->stateResult.store(
+                    accepted ? kStateResultOk : kStateResultRejected,
+                    std::memory_order_relaxed
+                );
             } else if (stateKind == kStateRequestCapture) {
-                const auto produced = stub::encodeState(gain, payload);
-                if (produced.size() <= stateCapacity) {
-                    std::memcpy(blob, produced.data(), produced.size());
-                    control->stateBytes.store(
-                        static_cast<std::uint32_t>(produced.size()),
-                        std::memory_order_relaxed
-                    );
-                    control->stateResult.store(
-                        kStateResultOk,
-                        std::memory_order_relaxed
-                    );
+                bool accepted = false;
+                if (isVst3) {
+                    std::vector<std::byte> produced;
+                    if (vst3Opened
+                        && vst3Host.saveState(produced)
+                        && produced.size() <= stateCapacity) {
+                        std::memcpy(blob, produced.data(), produced.size());
+                        control->stateBytes.store(
+                            static_cast<std::uint32_t>(produced.size()),
+                            std::memory_order_relaxed
+                        );
+                        accepted = true;
+                    }
                 } else {
-                    control->stateResult.store(
-                        kStateResultRejected,
-                        std::memory_order_relaxed
-                    );
+                    const auto produced = stub::encodeState(gain, payload);
+                    if (produced.size() <= stateCapacity) {
+                        std::memcpy(blob, produced.data(), produced.size());
+                        control->stateBytes.store(
+                            static_cast<std::uint32_t>(produced.size()),
+                            std::memory_order_relaxed
+                        );
+                        accepted = true;
+                    }
                 }
+                control->stateResult.store(
+                    accepted ? kStateResultOk : kStateResultRejected,
+                    std::memory_order_relaxed
+                );
             }
             control->stateCompletion.store(
                 stateSequence,
@@ -1291,16 +1415,28 @@ int PluginBridge::runChild(
         }
         const float* const source = inputBase(control);
         float* const destination = outputBase(control, capacity);
-        for (std::size_t index = 0U; index < samples; ++index) {
-            // Stand-in for plugin DSP: a deterministic, verifiable
-            // transform so a test can prove the audio round-tripped
-            // through the other process rather than being zeroed. The
-            // coefficient comes from restored state and from parameter
-            // events, so the same assertion also proves a restored blob or
-            // a queued change reached the DSP.
-            destination[index] = bypassed
-                ? source[index]
-                : source[index] * gain;
+        if (isVst3) {
+            // Bypass stays host-owned even for a real plugin: the session
+            // schema keeps it off SessionPlugin's DSP state, so it must
+            // never route through the plugin's own processing.
+            if (bypassed) {
+                std::memcpy(destination, source, samples * sizeof(float));
+            } else if (!vst3Opened
+                || !vst3Host.process(source, destination, frames)) {
+                std::fill_n(destination, samples, 0.0F);
+            }
+        } else {
+            for (std::size_t index = 0U; index < samples; ++index) {
+                // Stand-in for plugin DSP: a deterministic, verifiable
+                // transform so a test can prove the audio round-tripped
+                // through the other process rather than being zeroed. The
+                // coefficient comes from restored state and from parameter
+                // events, so the same assertion also proves a restored
+                // blob or a queued change reached the DSP.
+                destination[index] = bypassed
+                    ? source[index]
+                    : source[index] * gain;
+            }
         }
         ++handled;
         control->completionSequence.store(

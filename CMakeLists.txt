@@ -52,6 +52,7 @@ add_library(iramix_core STATIC
     src/platform/Platform.cpp
     src/plugin/PluginBridge.cpp
     src/plugin/PluginScanner.cpp
+    src/plugin/PluginStateAutosave.cpp
     src/plugin/Vst3Host.cpp
     src/persistence/AsyncProjectSaver.cpp
     src/persistence/AsyncSessionSaver.cpp

@@ -1,7 +1,10 @@
 #include "iramix/plugin/PluginBridge.hpp"
 
 #include "iramix/persistence/SessionDocument.hpp"
+#include "iramix/persistence/SessionPersistenceService.hpp"
 #include "iramix/plugin/PluginScanner.hpp"
+#include "iramix/plugin/PluginStateAutosave.hpp"
+#include "iramix/session/JournaledSession.hpp"
 
 #include <fstream>
 #include <system_error>
@@ -1035,12 +1038,146 @@ void testScanRejectsNonPlugin(const std::filesystem::path& self) {
            "metadata_invented=0\n";
 }
 
+// R-12's remaining gap: captureState() proves a live plugin can hand its
+// state back, but not that the captured bytes ever reach an autosaved
+// file rather than whatever stale blob the document already carried. This
+// drives the two together — a real AutosaveClock-scheduled window, not a
+// direct captureState()/serialize call pair.
+void testPluginStateWiredIntoAutosave(const std::filesystem::path& self) {
+    namespace plugin = iramix::plugin;
+    namespace persistence = iramix::persistence;
+    namespace session = iramix::session;
+    const TemporaryDirectory root;
+
+    auto document = makePluginSession(plugin::stub::encodeState(0.1F, {}));
+    document.revision = 1U;
+    const auto stableId = document.plugins.front().stableId;
+
+    std::string error;
+    auto bridge = plugin::PluginBridge::create(makeConfig(), error);
+    require(bridge != nullptr, error.c_str());
+    require(bridge->start(self, "normal", error), error.c_str());
+
+    const auto input = makeInput();
+    std::vector<float> output(kSamples, -1.0F);
+    require(
+        warmUp(*bridge, input, output),
+        "the plugin process services a block"
+    );
+
+    // A coefficient the document's placeholder cannot already hold, so a
+    // later match cannot be satisfied by the stale blob surviving
+    // untouched.
+    constexpr float liveGain = 0.75F;
+    require(
+        bridge->restoreState(plugin::stub::encodeState(liveGain, {}))
+            == plugin::PluginStateStatus::ok,
+        "the live plugin accepts a distinctive coefficient"
+    );
+
+    const std::vector<plugin::LivePluginBinding> bindings {
+        {.stableId = stableId, .bridge = bridge.get()},
+    };
+    plugin::PluginStateCaptureReport report;
+    auto snapshot = plugin::captureLivePluginState(
+        std::move(document),
+        bindings,
+        report
+    );
+    require(
+        report.captured == 1U
+            && report.unchanged == 0U
+            && report.failed == 0U,
+        "the bound plugin's live state is captured before autosave"
+    );
+
+    std::vector<std::byte> expected;
+    require(
+        bridge->captureState(expected) == plugin::PluginStateStatus::ok,
+        "a control read for comparison against the autosaved file"
+    );
+    require(
+        snapshot->plugins.front().state == expected,
+        "the snapshot handed to autosave already carries the live state"
+    );
+
+    const auto project = root.path() / "plugin-autosave-session.irpx";
+    auto clock = std::make_shared<persistence::ManualAutosaveClock>();
+    constexpr std::chrono::milliseconds window {5'000};
+    auto service = persistence::SessionPersistenceService::create(
+        project,
+        window,
+        error,
+        0U,
+        clock
+    );
+    require(service != nullptr, error.c_str());
+    require(service->start(error), error.c_str());
+    require(
+        service->markDirty(snapshot)
+            == persistence::AutosaveDirtyStatus::tracked,
+        "the captured snapshot starts the autosave window"
+    );
+    clock->advance(window);
+
+    const auto timeout =
+        std::chrono::steady_clock::now() + std::chrono::seconds {10};
+    auto query = service->query(1U);
+    while (
+        query.status != persistence::SessionSaveQueryStatus::committed
+        && std::chrono::steady_clock::now() < timeout
+    ) {
+        std::this_thread::sleep_for(std::chrono::milliseconds {1});
+        query = service->query(1U);
+    }
+    require(
+        query.status == persistence::SessionSaveQueryStatus::committed,
+        "the autosave window commits the captured snapshot"
+    );
+    service->stop();
+    bridge->stop();
+
+    // Reopening is the same mechanism testAutomaticBackupRestore uses to
+    // verify durable content: it goes through the real project store, not
+    // a shortcut past it.
+    auto reopened = session::JournaledSession::open(project, error);
+    require(reopened != nullptr, error.c_str());
+    const auto reopenedSnapshot = reopened->snapshot();
+    require(
+        reopenedSnapshot->plugins.size() == 1U
+            && reopenedSnapshot->plugins.front().state == expected,
+        "the durably autosaved file holds the live-captured state, "
+        "not the stale placeholder"
+    );
+
+    std::cout
+        << "Plugin state autosave: captured=" << report.captured
+        << ", unchanged=" << report.unchanged
+        << ", failed=" << report.failed
+        << ", autosaved_state_bytes=" << expected.size()
+        << ", durable_revision=" << query.durableRevision
+        << ", matches_live_capture=1\n";
+}
+
 } // namespace
 
 int main(const int argc, char* argv[]) {
-    if (argc == 4
+    if (argc >= 4 && argc <= 7
         && std::string_view {argv[1]} == "--plugin-bridge-child") {
-        return iramix::plugin::PluginBridge::runChild(argv[2], argv[3]);
+        const std::string vst3ModulePath = argc >= 5 ? argv[4] : "";
+        const auto vst3ClassIndex = argc >= 6
+            ? static_cast<std::uint32_t>(std::atoi(argv[5]))
+            : 0U;
+        const double vst3SampleRate = argc >= 7
+            ? std::atof(argv[6])
+            : 48'000.0;
+        return iramix::plugin::PluginBridge::runChild(
+            argv[2],
+            argv[3],
+            vst3ModulePath,
+            vst3ClassIndex,
+            vst3SampleRate
+        );
     }
     if (argc == 5
         && std::string_view {argv[1]} == "--plugin-scan-child") {
@@ -1053,6 +1190,7 @@ int main(const int argc, char* argv[]) {
     testPluginProcessHang(self);
     testBridgeRejections(self);
     testPluginStateRestoration(self);
+    testPluginStateWiredIntoAutosave(self);
     testPluginStateRejections(self);
     testPluginStateOnDeadPlugin(self);
     testParameterTransport(self);
