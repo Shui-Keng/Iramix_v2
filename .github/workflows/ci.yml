@@ -57,6 +57,12 @@ jobs:
           echo "--- library files shipped (.so = dynamic, .a = static) ---"
           dpkg -L libjack-jackd2-dev libjack-jackd2-0 2>/dev/null \
             | grep -E '\.(so|a)($|\.)' | sort || true
+          # The sorted License: lines above cover the whole jackd2 source
+          # package, server included, so they cannot say which licence
+          # governs the client library specifically. These stanzas can.
+          echo "--- copyright stanzas governing the client library ---"
+          awk '/^Files:/{f=$0} /^License:/{if (f ~ /common|libjack|\*/) print f" => "$0}' \
+            /usr/share/doc/libjack-jackd2-dev/copyright | sort -u || true
 
       - name: Configure
         run: cmake --preset ${{ matrix.preset }}
