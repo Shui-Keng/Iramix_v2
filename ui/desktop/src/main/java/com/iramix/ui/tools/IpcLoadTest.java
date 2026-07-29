@@ -15,8 +15,15 @@ public final class IpcLoadTest {
     // and it measures the idle frame period that makes the under-load
     // period interpretable. One frame would be noise, not a period.
     private static final int BASELINE_FRAMES = 8;
+    // The ping path gets WARMUP_COMMANDS; the render path needs the
+    // same courtesy. Without this the baseline samples the render
+    // loop's first frames after startup and can capture JIT and lazy
+    // initialization, which made the idle period swing 1.9-21.8 ms
+    // between CI runs and produced a control slower than the load it
+    // was supposed to be a control for.
+    private static final int WARMUP_FRAMES = 30;
     private static final Duration BASELINE_TIMEOUT =
-        Duration.ofSeconds(10);
+        Duration.ofSeconds(20);
     // On a fast runner the window spans barely two frame periods
     // (macOS CI: 1,000 pings in ~73ms against a ~35ms frame), so a
     // healthy loop can legitimately complete no frame inside it. The
@@ -44,6 +51,21 @@ public final class IpcLoadTest {
                 session.ping();
             }
 
+            if (
+                !uiLoad.awaitFrameAfter(
+                    uiLoad.renderedFrames() + WARMUP_FRAMES - 1,
+                    BASELINE_TIMEOUT
+                )
+            ) {
+                throw new AssertionError(
+                    "Dummy Skia UI render loop did not complete "
+                        + WARMUP_FRAMES + " warmup frames in "
+                        + BASELINE_TIMEOUT.toMillis()
+                        + "ms; the render loop never reached steady "
+                        + "state."
+                );
+            }
+
             var framesBeforeBaseline = uiLoad.renderedFrames();
             var baselineStart = System.nanoTime();
             if (
@@ -57,8 +79,10 @@ public final class IpcLoadTest {
                         + (uiLoad.renderedFrames() - framesBeforeBaseline)
                         + " of " + BASELINE_FRAMES + " baseline frames "
                         + "in " + BASELINE_TIMEOUT.toMillis()
-                        + "ms before the measurement window opened; "
-                        + "the render loop never reached steady state."
+                        + "ms before the measurement window opened, "
+                        + "despite having completed " + WARMUP_FRAMES
+                        + " warmup frames; the render loop stalled "
+                        + "after reaching steady state."
                 );
             }
             var baselineNanos = System.nanoTime() - baselineStart;
