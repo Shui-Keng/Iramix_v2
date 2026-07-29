@@ -112,8 +112,21 @@ tasks.register("gpuSpike", JavaExec) {
     environment "IRAMIX_SKIKO_TARGET", skikoTarget
 }
 
+tasks.register("gpuRecoverySpike", JavaExec) {
+    group = "verification"
+    description = "Continuously renders while resizing a SkiaLayer " +
+        "window and moving it across real monitors when available."
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = "com.iramix.ui.tools.GpuRecoverySpike"
+    environment "IRAMIX_SKIKO_TARGET", skikoTarget
+}
+
 tasks.named("ipcLoadTest") {
     mustRunAfter("architectureSmoke")
+}
+
+tasks.named("gpuRecoverySpike") {
+    mustRunAfter("gpuSpike")
 }
 
 tasks.named("check") {
@@ -121,7 +134,8 @@ tasks.named("check") {
         "architectureSmoke",
         "ipcLoadTest",
         "rasterSpike",
-        "gpuSpike"
+        "gpuSpike",
+        "gpuRecoverySpike"
     )
 }
 

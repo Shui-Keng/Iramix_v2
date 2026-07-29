@@ -132,9 +132,11 @@ It does not prove:
   only. Whether Linux with an actual GPU selects OpenGL and what that
   costs remains unmeasured;
 - **anything about resize, monitor move, sleep/wake, or device loss.**
-  The window is created once at a fixed size and never touched again.
-  These are the remaining Week 4 exit items and are explicitly deferred
-  to later slices, not attempted here;
+  This slice's window is created once at a fixed size and never touched.
+  Resize now has separate Windows Direct3D evidence in
+  `SKIA_GPU_RESIZE_MONITOR_RECOVERY_2026-07-29.md`; monitor move remains
+  a declared single-monitor limitation, and sleep/wake and device loss
+  remain unattempted;
 - **anything about HiDPI.** `size` matched `logical` because this host
   reported no scale factor; a scaled display was not exercised, and R-07
   stays open;
