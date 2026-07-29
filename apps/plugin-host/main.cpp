@@ -206,6 +206,119 @@ constexpr std::uint32_t kStateCapacity = 65'536U;
         : EXIT_FAILURE;
 }
 
+// Proves a real plugin's own IEditController parameter — never the
+// stand-in's synthetic gain/bypass — is what the bridge's existing
+// parameter transport now delivers. Correctness is judged by the
+// plugin's own state, not a guessed audio effect: an arbitrary
+// parameter is not guaranteed to be audible against a fixed test tone
+// (and may address something silent, like a bypass or mode switch), but
+// a plugin that reflects controller-driven changes into getState()
+// output at all can only show a different blob if the change reached
+// real plugin code, not merely the transport.
+[[nodiscard]] int runParameterProbe(
+    const std::filesystem::path& self,
+    const std::filesystem::path& target,
+    const std::uint32_t classIndex
+) {
+    namespace plugin = iramix::plugin;
+
+    plugin::PluginBridgeConfig config {
+        .maximumFrames = kFrames,
+        .channelCount = kChannels,
+        .deadline = std::chrono::milliseconds {20},
+        .maximumStateBytes = kStateCapacity,
+        .stateDeadline = std::chrono::milliseconds {250},
+        .parameterQueueCapacity = 64U,
+    };
+
+    std::string error;
+    auto bridge = plugin::PluginBridge::create(config, error);
+    if (bridge == nullptr) {
+        std::cout << "Plugin bridge parameters: created=0, reason="
+                   << error << "\n";
+        return EXIT_FAILURE;
+    }
+    if (!bridge->startVst3(self, target, classIndex, kSampleRate, error)) {
+        std::cout << "Plugin bridge parameters: started=0, reason="
+                   << error << "\n";
+        return EXIT_FAILURE;
+    }
+
+    const auto input = makeInput();
+    std::vector<float> output(input.size(), 0.0F);
+    if (!warmUp(*bridge, input, output)) {
+        std::cout
+            << "Plugin bridge parameters: opened=0, "
+               "reason=child_exited_before_first_block\n";
+        return EXIT_FAILURE;
+    }
+
+    const auto metadata = bridge->parameterMetadata();
+    if (metadata.count == 0U) {
+        std::cout
+            << "Plugin bridge parameters: module="
+            << target.filename().string()
+            << ", parameter_count=0, "
+               "reason=no_ieditcontroller_or_no_parameters\n";
+        bridge->stop();
+        return EXIT_SUCCESS;
+    }
+
+    std::vector<std::byte> before;
+    const bool capturedBefore =
+        bridge->captureState(before) == plugin::PluginStateStatus::ok;
+
+    // Away from the default and still in range: a value equal to the
+    // plugin's own default could leave state unchanged for a legitimate
+    // reason having nothing to do with whether delivery worked.
+    const float requestedValue =
+        metadata.firstParameterDefault > 0.5F ? 0.0F : 1.0F;
+    const auto setStatus = bridge->setParameterById(
+        metadata.firstParameterId,
+        requestedValue,
+        bridge->samplePosition()
+    );
+
+    // Several blocks, not one: the change is scheduled for "now" by
+    // sample position, and giving it more than one block's worth of
+    // margin keeps this probe from depending on exactly which block the
+    // scheduler lands it in.
+    for (int index = 0; index < 10; ++index) {
+        static_cast<void>(bridge->processBlock(input, output, kFrames));
+    }
+
+    std::vector<std::byte> after;
+    const bool capturedAfter =
+        bridge->captureState(after) == plugin::PluginStateStatus::ok;
+
+    const auto counters = bridge->counters();
+    bridge->stop();
+
+    const bool stateChanged =
+        capturedBefore && capturedAfter && before != after;
+
+    std::cout
+        << "Plugin bridge parameters: module="
+        << target.filename().string()
+        << ", parameter_count=" << metadata.count
+        << ", first_parameter_id=" << metadata.firstParameterId
+        << ", first_parameter_default=" << metadata.firstParameterDefault
+        << ", requested_value=" << requestedValue
+        << ", set_status="
+        << (setStatus == plugin::PluginParameterStatus::accepted
+                ? "accepted"
+                : "rejected")
+        << ", parameters_applied=" << counters.parametersApplied
+        << ", state_before_bytes=" << before.size()
+        << ", state_after_bytes=" << after.size()
+        << ", state_changed_by_parameter=" << (stateChanged ? 1 : 0)
+        << "\n";
+    return (setStatus == plugin::PluginParameterStatus::accepted
+            && counters.parametersApplied > 0U)
+        ? EXIT_SUCCESS
+        : EXIT_FAILURE;
+}
+
 } // namespace
 
 int main(const int argc, char* argv[]) {
@@ -243,17 +356,20 @@ int main(const int argc, char* argv[]) {
     if (argc < 2) {
         std::cerr
             << "usage: iramix_plugin_host <module-or-bundle> "
-               "[class-index] [--crash|--hang]\n";
+               "[class-index] [--crash|--hang|--params]\n";
         return EXIT_FAILURE;
     }
 
     std::filesystem::path target {argv[1]};
     std::uint32_t classIndex = 0U;
     std::string faultFlag;
+    bool paramsFlag = false;
     for (int index = 2; index < argc; ++index) {
         const std::string_view value {argv[index]};
         if (value == "--crash" || value == "--hang") {
             faultFlag = value;
+        } else if (value == "--params") {
+            paramsFlag = true;
         } else {
             classIndex = static_cast<std::uint32_t>(std::atoi(argv[index]));
         }
@@ -279,6 +395,13 @@ int main(const int argc, char* argv[]) {
             target,
             classIndex,
             faultFlag == "--hang"
+        );
+    }
+    if (paramsFlag) {
+        return runParameterProbe(
+            std::filesystem::absolute(argv[0]),
+            target,
+            classIndex
         );
     }
 

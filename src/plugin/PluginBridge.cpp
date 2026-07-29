@@ -125,6 +125,17 @@ struct SharedControl final {
     std::atomic<std::uint64_t> blockStartSample;
     std::atomic<std::uint64_t> parametersApplied;
     std::atomic<std::uint64_t> parametersLate;
+    // Written once by a "vst3" child before childReady, never after:
+    // enough for the host to address a real parameter by its own ID
+    // through the existing setParameter() transport, without a general
+    // per-parameter enumeration protocol across the process boundary.
+    // Zero for the stand-in and for a plugin with no IEditController.
+    std::atomic<std::uint32_t> vst3ParameterCount;
+    std::atomic<std::uint32_t> vst3FirstParameterId;
+    // Bit pattern of a float, not a float atomic: keeps this struct's
+    // lock-free guarantee resting on the uint32/uint64 specializations
+    // already asserted below rather than adding a new one.
+    std::atomic<std::uint32_t> vst3FirstParameterDefaultBits;
 };
 
 static_assert(
@@ -812,8 +823,8 @@ std::uint64_t PluginBridge::samplePosition() const noexcept {
     return impl_->samplePosition;
 }
 
-PluginParameterStatus PluginBridge::setParameter(
-    const PluginParameterId parameter,
+PluginParameterStatus PluginBridge::setParameterById(
+    const std::uint32_t parameterId,
     const float value,
     const std::uint64_t sampleTime
 ) noexcept {
@@ -845,7 +856,7 @@ PluginParameterStatus PluginBridge::setParameter(
     auto* const slot = parameterBase(control, impl_->sampleCount())
         + (write & (impl_->parameterCapacity - 1U));
     slot->sampleTime = sampleTime;
-    slot->parameterId = static_cast<std::uint32_t>(parameter);
+    slot->parameterId = parameterId;
     slot->value = value;
     // Publishes the record above: the child acquires this index before it
     // reads the slot.
@@ -855,6 +866,42 @@ PluginParameterStatus PluginBridge::setParameter(
     impl_->hasParameterTime = true;
     ++impl_->counters.parametersSent;
     return PluginParameterStatus::accepted;
+}
+
+PluginParameterStatus PluginBridge::setParameter(
+    const PluginParameterId parameter,
+    const float value,
+    const std::uint64_t sampleTime
+) noexcept {
+    return setParameterById(
+        static_cast<std::uint32_t>(parameter),
+        value,
+        sampleTime
+    );
+}
+
+PluginParameterMetadata PluginBridge::parameterMetadata() const noexcept {
+    if (impl_->control == nullptr
+        || impl_->control->childReady.load(std::memory_order_acquire)
+            == 0U) {
+        return {};
+    }
+    PluginParameterMetadata metadata {};
+    metadata.count = impl_->control->vst3ParameterCount.load(
+        std::memory_order_relaxed
+    );
+    metadata.firstParameterId = impl_->control->vst3FirstParameterId.load(
+        std::memory_order_relaxed
+    );
+    const auto bits = impl_->control->vst3FirstParameterDefaultBits.load(
+        std::memory_order_relaxed
+    );
+    std::memcpy(
+        &metadata.firstParameterDefault,
+        &bits,
+        sizeof(metadata.firstParameterDefault)
+    );
+    return metadata;
 }
 
 PluginStateStatus PluginBridge::restoreState(
@@ -1214,6 +1261,34 @@ int PluginBridge::runChild(
 #endif
             return 30;
         }
+        // Enough for the host to address a real parameter by ID, without
+        // a general enumeration protocol: the count, and the first
+        // parameter's own ID and default. Written once, before
+        // childReady, so there is no window where the host could observe
+        // a ready child with stale or half-written metadata.
+        Vst3ParameterInfo firstParameter {};
+        const auto hasParameter =
+            vst3Host.parameterInfo(0U, firstParameter);
+        control->vst3ParameterCount.store(
+            vst3Host.info().parameterCount,
+            std::memory_order_relaxed
+        );
+        if (hasParameter) {
+            std::uint32_t defaultBits = 0U;
+            std::memcpy(
+                &defaultBits,
+                &firstParameter.defaultNormalizedValue,
+                sizeof(defaultBits)
+            );
+            control->vst3FirstParameterId.store(
+                firstParameter.id,
+                std::memory_order_relaxed
+            );
+            control->vst3FirstParameterDefaultBits.store(
+                defaultBits,
+                std::memory_order_relaxed
+            );
+        }
     }
 
     control->childReady.store(1U, std::memory_order_release);
@@ -1411,14 +1486,28 @@ int PluginBridge::runChild(
                 }
                 if (event.parameterId
                     == static_cast<std::uint32_t>(
+                        PluginParameterId::bypass
+                    )) {
+                    // Host-owned regardless of plugin kind: the session
+                    // schema keeps bypass off SessionPlugin's DSP state,
+                    // so neither the stand-in nor a real plugin's own
+                    // IEditController parameter list may claim it.
+                    bypassed = event.value != 0.0F;
+                } else if (isVst3) {
+                    // Any other ID is the real plugin's own parameter,
+                    // named through its IEditController — never the
+                    // stand-in's synthetic "gain" concept, which does not
+                    // apply here.
+                    static_cast<void>(vst3Opened
+                        && vst3Host.setParameterNormalized(
+                            event.parameterId,
+                            event.value
+                        ));
+                } else if (event.parameterId
+                    == static_cast<std::uint32_t>(
                         PluginParameterId::gain
                     )) {
                     gain = event.value;
-                } else if (event.parameterId
-                    == static_cast<std::uint32_t>(
-                        PluginParameterId::bypass
-                    )) {
-                    bypassed = event.value != 0.0F;
                 }
                 ++applied;
                 ++readIndex;

@@ -108,6 +108,17 @@ enum class PluginParameterStatus : std::uint32_t {
     unavailable = 4U,
 };
 
+// Enough of a "vst3" child's real IEditController parameter list for the
+// host to address one parameter by its own ID through setParameterById(),
+// without a general per-parameter enumeration protocol across the
+// process boundary. Both fields are zero for the stand-in, and for a
+// real plugin with no IEditController or no parameters at all.
+struct PluginParameterMetadata final {
+    std::uint32_t count {0U};
+    std::uint32_t firstParameterId {0U};
+    float firstParameterDefault {0.0F};
+};
+
 // Runs plugin audio in a separate process over shared memory.
 //
 // The design property being validated is negative: nothing the child does —
@@ -184,6 +195,19 @@ public:
         std::uint64_t sampleTime
     ) noexcept;
 
+    // Same transport as setParameter(), addressed by a plugin's own raw
+    // parameter ID rather than the stand-in's PluginParameterId enum.
+    // What a real plugin's IEditController parameters are reached
+    // through — PluginParameterId::gain has no meaning for a real
+    // plugin, but PluginParameterId::bypass is still delivered as bypass
+    // regardless of which overload sends it, since the bridge dispatches
+    // on the wire ID, not on which call produced it.
+    [[nodiscard]] PluginParameterStatus setParameterById(
+        std::uint32_t parameterId,
+        float value,
+        std::uint64_t sampleTime
+    ) noexcept;
+
     // Sample position of the next block. The bridge advances this by
     // frameCount on every processBlock() call, degraded ones included —
     // transport does not stop because a plugin missed its deadline. A real
@@ -209,6 +233,10 @@ public:
     [[nodiscard]] PluginBridgeCounters counters() const noexcept;
     [[nodiscard]] bool childRunning() const noexcept;
     [[nodiscard]] std::string sharedMemoryName() const;
+
+    // Populated by a "vst3" child before it signals ready; {0, 0, 0.0}
+    // before the child is ready, or for the stand-in.
+    [[nodiscard]] PluginParameterMetadata parameterMetadata() const noexcept;
 
     // Child-process entry point. Attaches to the named shared memory and
     // services blocks until asked to stop. mode == "vst3" loads
