@@ -148,6 +148,21 @@ public:
         std::string& error
     );
 
+    // Real-plugin mode with fault injection: after three real blocks have
+    // gone through the actual plugin's own DSP, the child crashes
+    // (hang == false) or hangs (hang == true). Exists to prove the
+    // bridge's crash/hang recovery contract when the process that fails
+    // was, until the moment it does, genuinely running third-party plugin
+    // code rather than only the stand-in.
+    [[nodiscard]] bool startVst3Fault(
+        const std::filesystem::path& childExecutable,
+        const std::filesystem::path& vst3ModulePath,
+        std::uint32_t vst3ClassIndex,
+        double sampleRate,
+        bool hang,
+        std::string& error
+    );
+
     void stop() noexcept;
 
     // Audio-callback entry point. Performs no allocation, acquires no lock,

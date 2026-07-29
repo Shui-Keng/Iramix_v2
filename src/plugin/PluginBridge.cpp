@@ -708,6 +708,28 @@ bool PluginBridge::startVst3(
     );
 }
 
+bool PluginBridge::startVst3Fault(
+    const std::filesystem::path& childExecutable,
+    const std::filesystem::path& vst3ModulePath,
+    const std::uint32_t vst3ClassIndex,
+    const double sampleRate,
+    const bool hang,
+    std::string& error
+) {
+    return startWithArguments(
+        childExecutable,
+        {
+            "--plugin-bridge-child",
+            impl_->name,
+            hang ? "vst3-hang" : "vst3-crash",
+            vst3ModulePath.string(),
+            std::to_string(vst3ClassIndex),
+            std::to_string(sampleRate),
+        },
+        error
+    );
+}
+
 void PluginBridge::stop() noexcept {
     if (impl_ == nullptr) {
         return;
@@ -1159,8 +1181,13 @@ int PluginBridge::runChild(
     // plugin's own DSP and its own state format. An open failure here is
     // reported the same way a crashed child is — by exiting before the
     // request loop — because the host has no channel back to this process
-    // other than watching whether it kept running.
-    const bool isVst3 = mode == "vst3";
+    // other than watching whether it kept running. "vst3-crash" and
+    // "vst3-hang" host the same real plugin and additionally inject a
+    // fault after a few genuine blocks, so the crash/hang recovery
+    // contract is proven against a process that was actually running
+    // third-party code, not only the synthetic stand-in.
+    const bool isVst3 =
+        mode == "vst3" || mode == "vst3-crash" || mode == "vst3-hang";
     Vst3Host vst3Host;
     bool vst3Opened = false;
     if (isVst3) {
@@ -1330,13 +1357,13 @@ int PluginBridge::runChild(
         // Fault injection happens after a few good blocks so a test can
         // observe the healthy path and the failure in one run.
         if (handled == 3U) {
-            if (mode == "crash") {
+            if (mode == "crash" || mode == "vst3-crash") {
                 // Abrupt termination with the region still mapped: the
                 // host must survive this without the operating system
                 // unwinding anything on its behalf.
                 ::_Exit(99);
             }
-            if (mode == "hang") {
+            if (mode == "hang" || mode == "vst3-hang") {
                 for (;;) {
                     std::this_thread::sleep_for(
                         std::chrono::milliseconds {50}

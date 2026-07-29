@@ -90,6 +90,122 @@ constexpr std::uint32_t kStateCapacity = 65'536U;
     return false;
 }
 
+// Proves the bridge's crash/hang recovery contract when the process that
+// fails was, until the moment it does, genuinely running a real plugin's
+// own DSP rather than only the synthetic stand-in
+// (testPluginProcessTermination / testPluginProcessHang in
+// iramix_plugin_tests exercise the stand-in only).
+[[nodiscard]] int runFaultProbe(
+    const std::filesystem::path& self,
+    const std::filesystem::path& target,
+    const std::uint32_t classIndex,
+    const bool hang
+) {
+    namespace plugin = iramix::plugin;
+
+    plugin::PluginBridgeConfig config {
+        .maximumFrames = kFrames,
+        .channelCount = kChannels,
+        .deadline = std::chrono::milliseconds {20},
+        .maximumStateBytes = kStateCapacity,
+        .stateDeadline = std::chrono::milliseconds {250},
+        .parameterQueueCapacity = 0U,
+    };
+
+    std::string error;
+    auto bridge = plugin::PluginBridge::create(config, error);
+    if (bridge == nullptr) {
+        std::cout << "Plugin bridge fault: created=0, reason="
+                   << error << "\n";
+        return EXIT_FAILURE;
+    }
+    if (!bridge->startVst3Fault(
+            self,
+            target,
+            classIndex,
+            kSampleRate,
+            hang,
+            error
+        )) {
+        std::cout << "Plugin bridge fault: started=0, reason="
+                   << error << "\n";
+        return EXIT_FAILURE;
+    }
+
+    const auto input = makeInput();
+    std::vector<float> output(input.size(), 0.0F);
+    if (!warmUp(*bridge, input, output)) {
+        std::cout
+            << "Plugin bridge fault: opened=0, "
+               "reason=child_exited_before_first_block\n";
+        return EXIT_FAILURE;
+    }
+
+    std::size_t processed = 0U;
+    std::size_t degraded = 0U;
+    bool everyDegradedSilent = true;
+    double worstMilliseconds = 0.0;
+    constexpr std::size_t attempts = 100U;
+    for (std::size_t index = 0U; index < attempts; ++index) {
+        std::fill(output.begin(), output.end(), -1.0F);
+        const auto started = std::chrono::steady_clock::now();
+        const auto status = bridge->processBlock(input, output, kFrames);
+        worstMilliseconds = std::max(
+            worstMilliseconds,
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - started
+            ).count()
+        );
+        if (status == plugin::PluginBlockStatus::processed) {
+            ++processed;
+            continue;
+        }
+        ++degraded;
+        everyDegradedSilent = everyDegradedSilent
+            && std::all_of(
+                output.begin(),
+                output.end(),
+                [](const float sample) {
+                    return sample == 0.0F;
+                }
+            );
+    }
+
+    const auto counters = bridge->counters();
+    bridge->stop();
+
+    // "processed" here is what this driving process observed during the
+    // measured window, not how many blocks the plugin actually rendered:
+    // the fault always fires after exactly three genuine blocks by
+    // construction (runChild() only reaches the "handled == 3" check
+    // after the real plugin's own DSP has run), but Win32 auto-reset
+    // event coalescing means several of the warm-up loop's own retries
+    // during the plugin's multi-hundred-millisecond load time can be
+    // serviced — and the fault triggered — before this process observes
+    // its first success. A low or zero "processed" figure is therefore
+    // expected, not a failure; degraded/silent/survived are what this
+    // probe actually asserts.
+    //
+    // Reaching this line at all is part of the evidence: the host process
+    // is still executing normally after stop(), including after the hang
+    // case, whose only recovery path is stop()'s bounded
+    // wait-then-terminate.
+    std::cout
+        << "Plugin bridge fault: module=" << target.filename().string()
+        << ", fault=" << (hang ? "hang" : "crash")
+        << ", attempts=" << attempts
+        << ", processed=" << processed
+        << ", degraded=" << degraded
+        << ", every_degraded_silent=" << (everyDegradedSilent ? 1 : 0)
+        << ", worst_block_ms=" << worstMilliseconds
+        << ", deadline_misses=" << counters.deadlineMisses
+        << ", exited_blocks=" << counters.exitedBlocks
+        << ", host_survived=1\n";
+    return (degraded > 0U && everyDegradedSilent)
+        ? EXIT_SUCCESS
+        : EXIT_FAILURE;
+}
+
 } // namespace
 
 int main(const int argc, char* argv[]) {
@@ -127,14 +243,21 @@ int main(const int argc, char* argv[]) {
     if (argc < 2) {
         std::cerr
             << "usage: iramix_plugin_host <module-or-bundle> "
-               "[class-index]\n";
+               "[class-index] [--crash|--hang]\n";
         return EXIT_FAILURE;
     }
 
     std::filesystem::path target {argv[1]};
-    const auto classIndex = argc >= 3
-        ? static_cast<std::uint32_t>(std::atoi(argv[2]))
-        : 0U;
+    std::uint32_t classIndex = 0U;
+    std::string faultFlag;
+    for (int index = 2; index < argc; ++index) {
+        const std::string_view value {argv[index]};
+        if (value == "--crash" || value == "--hang") {
+            faultFlag = value;
+        } else {
+            classIndex = static_cast<std::uint32_t>(std::atoi(argv[index]));
+        }
+    }
 
     // Accept a bundle directory as well as a binary, so the same path that
     // came out of the scanner can be pasted straight in.
@@ -148,6 +271,15 @@ int main(const int argc, char* argv[]) {
                 break;
             }
         }
+    }
+
+    if (!faultFlag.empty()) {
+        return runFaultProbe(
+            std::filesystem::absolute(argv[0]),
+            target,
+            classIndex,
+            faultFlag == "--hang"
+        );
     }
 
     plugin::PluginBridgeConfig config {
