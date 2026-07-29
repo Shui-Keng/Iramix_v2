@@ -78,12 +78,34 @@ tasks.register("ipcLoadTest", JavaExec) {
     }
 }
 
+tasks.register("rasterSpike", JavaExec) {
+    group = "verification"
+    description = "Compares Skia raster captures against committed " +
+        "baselines and measures frame time at four display scales."
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = "com.iramix.ui.tools.RasterSpike"
+    // No window is opened: the spike renders into an off-screen raster
+    // surface, so it must run on headless CI unchanged.
+    systemProperty "java.awt.headless", "true"
+    environment "IRAMIX_SKIKO_TARGET", skikoTarget
+    environment(
+        "IRAMIX_RASTER_BASELINES",
+        file("baselines").absolutePath
+    )
+    def baselineMode = providers
+        .gradleProperty("iramixRasterBaselines")
+        .getOrNull()
+    if (baselineMode == "write") {
+        environment "IRAMIX_RASTER_BASELINE_MODE", "write"
+    }
+}
+
 tasks.named("ipcLoadTest") {
     mustRunAfter("architectureSmoke")
 }
 
 tasks.named("check") {
-    dependsOn("architectureSmoke", "ipcLoadTest")
+    dependsOn("architectureSmoke", "ipcLoadTest", "rasterSpike")
 }
 
 dependencyLocking {
