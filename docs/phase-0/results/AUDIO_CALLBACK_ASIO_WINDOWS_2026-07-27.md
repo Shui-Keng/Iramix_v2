@@ -103,7 +103,12 @@ The raw stdout is also retained locally at
 ## Remaining exit evidence
 
 - investigate or reproduce the 64-frame cadence deficit on a native hardware
-  ASIO driver and a declared reference audio interface;
+  ASIO driver and a declared reference audio interface — reproduced and
+  characterized on 2026-07-29 in
+  [`AUDIO_CALLBACK_64_FRAME_FEASIBILITY_2026-07-29.md`](AUDIO_CALLBACK_64_FRAME_FEASIBILITY_2026-07-29.md),
+  which also answers the distribution note above: the late wakeups are spread
+  evenly across all ten windows. A native hardware interface is still absent,
+  so that half of this item is now tracked as risk R-15 rather than a task;
 - retain driver-level xrun evidence or add acoustic loopback verification;
 - run equivalent Core Audio and Linux backend probes;
 - complete the full two-hour Week 2 soak;

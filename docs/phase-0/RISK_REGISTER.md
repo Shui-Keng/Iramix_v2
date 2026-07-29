@@ -18,6 +18,7 @@ Scoring: probability and impact range from 1 to 5. Priority is their product.
 | R-12 | Plugin state blocks autosave or recovery | 3 | 4 | 12 | Size and time limits measured: the state region is sized before audio flows, an oversized blob is refused before it is written, and a capture from a crashed plugin times out at its deadline rather than stalling. See `results/PLUGIN_STATE_RESTORATION_2026-07-28.md`. Capture is now wired into a real `AutosaveClock`-scheduled autosave window and read back through the project store: see `results/PLUGIN_STATE_AUTOSAVE_WIRING_2026-07-29.md`. Still open: only the stand-in plugin and a single successful binding were exercised — a capture timeout or rejection arriving exactly when an autosave window fires is untested, and no `SessionController`/`JournaledSession` caller exists yet to invoke the new capture-into-autosave path during real editing |
 | R-13 | No macOS or Linux hardware is available to the project | 5 | 4 | 20 | **Accepted for Phase 0.** Hosted three-OS CI covers portability, correctness, and sanitizers; performance evidence is Windows-only by decision. See "Reference-hardware coverage gap" |
 | R-14 | Redistributing third-party binaries without required attribution | 2 | 4 | 8 | Skiko runtime jars ship Skia and ICU binaries with no notice file; obligations L-1 to L-4 tracked in `DEPENDENCIES.md` and gated before any distributable build |
+| R-15 | No native hardware audio interface is available, so the 64-frame latency budget cannot be validated | 5 | 4 | 20 | **Accepted for Phase 0.** Measured, not assumed: `results/AUDIO_CALLBACK_64_FRAME_FEASIBILITY_2026-07-29.md` shows WASAPI's default endpoint on the reference machine reports one legal engine period (min = max = fundamental = 512 frames) and rejects both 64 and 128 in shared and exclusive mode, while ASIO4ALL v2 opens 64 but sustains 83.448% of nominal callbacks with 705–1,632 late wakeups in every one of ten equal windows — steady-state, not startup. The engine is not the constraint: p99 callback duration at 64 frames is 0.0129 ms against a 0.93 ms budget, with zero target and zero hard deadline misses. See "64-frame buffer coverage gap" |
 
 ## Critical escalation rule
 
@@ -61,6 +62,59 @@ Cold-cache open behavior, storage-contention behavior, and audio-callback
 deadline behavior on macOS and Linux remain unmeasured entering Phase 1.
 Closing them requires borrowed, rented, or purchased hardware on both
 platforms; it cannot be closed by additional work on the existing machine.
+This acceptance covers Phase 0 only and should be revisited when Phase 1
+scope is committed.
+
+## 64-frame buffer coverage gap
+
+**Status: accepted as a Phase 0 risk on 2026-07-29.**
+
+R-15 is a hardware constraint like R-13, not an open engineering task, and it
+is recorded here rather than left in the plan as a task that can never be
+ticked. The reference machine has no audio interface with its own clock and
+its own vendor ASIO driver. What it has is an onboard Realtek codec whose
+WASAPI engine period is fixed at 512 frames, and `ASIO4ALL v2`, a wrapper
+that drives that same endpoint.
+
+### What was measured before accepting
+
+The acceptance is not "we could not try". Both Windows backends were run at
+64, 128, and 256 frames for 200 seconds each, with the production immutable
+graph as the callback workload on both — the ASIO probe previously measured a
+lighter stand-in, so this is the first comparable pair.
+
+1. WASAPI: `GetSharedModeEnginePeriod` returns minimum = maximum =
+   fundamental = 512 on the default render endpoint. Shared mode has exactly
+   one legal period; exclusive mode rejects 64 and 128 with
+   `AUDCLNT_E_INVALID_DEVICE_PERIOD`. Both modes were attempted.
+2. ASIO4ALL v2 opens 64 frames and then delivers 125,172 of 150,000 expected
+   callbacks — 83.448%, a deficit that *worsened* from 12.584% to 16.552%
+   when the production graph replaced the stand-in workload.
+3. The deficit is steady-state. Ten equal 20-second windows carry 1,444, 705,
+   1,156, 942, 1,632, 1,383, 1,471, 1,169, 1,398, and 1,376 late wakeups. A
+   longer run would confirm it, not average it away.
+4. The engine is not what fails. At 64 frames the callback finishes in
+   0.0129 ms at p99 against a 0.93 ms budget, with zero target misses, zero
+   hard deadline misses, zero allocations, and zero blocking locks.
+
+### Accepted position
+
+The 64-frame entry in `PERFORMANCE_BUDGETS.md` is **unvalidated** entering
+Phase 1 — neither met nor failed. Reporting it as failed would blame the
+engine for a device limit the same evidence rules out; reporting it as met
+would be an outright fabrication. 128 frames is validated on ASIO only, and
+256 frames on both backends.
+
+The likely explanation — that a 64-frame ASIO buffer here is a software
+subdivision of a 512-frame hardware period — is consistent with all four
+measurements and is recorded in the result document as a hypothesis. The
+probe cannot see inside the driver, so it stays a hypothesis.
+
+### What this defers
+
+Whether Iramix can hold a 64-frame deadline on real interface hardware is
+unknown entering Phase 1. Closing it requires an audio interface with a
+native ASIO driver; it cannot be closed by further work on this machine.
 This acceptance covers Phase 0 only and should be revisited when Phase 1
 scope is committed.
 

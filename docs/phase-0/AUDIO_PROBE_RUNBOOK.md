@@ -87,14 +87,29 @@ seconds per buffer:
 3 buffers × 2,400 seconds = 7,200 seconds = 2 hours per operating system
 ```
 
+The unit is 2,400 seconds **per configuration**, not the 7,200-second
+total. A buffer size that no available device can deliver is skipped and
+recorded as unvalidated rather than soaked; on the Windows reference
+machine that is 64 frames (R-15), so its soak is 4,800 seconds.
+
+Run the machine idle. Nothing else may be started for the duration —
+this hardware's tail has already been measured widening under concurrent
+load, so a contaminated log must be discarded rather than reported.
+
 Commands:
 
 ```powershell
 # Windows, named native hardware ASIO driver preferred
 .\build\windows-msvc\Release\iramix_asio_probe.exe `
   --driver "Driver Name" `
+  --buffers 128,256 `
   --seconds-per-buffer 2400
 ```
+
+`--buffers` takes a comma-separated subset of `64,128,256` and refuses
+anything else, so a typo cannot silently soak the wrong period for forty
+minutes. The chosen list is echoed as `requested_buffers=` in the header
+line. Omit the flag to run all three.
 
 ```sh
 # macOS Core Audio or Linux JACK
@@ -108,7 +123,7 @@ Commands:
 | 2026-07-28 | macOS initial 10-minute Core Audio run | Reference Mac and output device available |
 | 2026-07-29 | Linux initial 10-minute JACK run | JACK 48 kHz on reference interface |
 | 2026-07-30 | Compare all initial logs and freeze probe revision | Windows/macOS/Linux logs present |
-| 2026-07-31 | Windows two-hour ASIO run | Native hardware driver selected; 64 cadence issue addressed or explicitly accepted |
+| 2026-07-29 | Windows ASIO soak — **done** | Ran at 128 and 256 frames for 2,400 s each on an idle machine; 64 skipped per R-15. See [`results/AUDIO_CALLBACK_SOAK_WINDOWS_2026-07-29.md`](results/AUDIO_CALLBACK_SOAK_WINDOWS_2026-07-29.md) |
 | 2026-08-01 | macOS two-hour Core Audio run | Initial Core Audio configurations accepted |
 | 2026-08-02 | Linux two-hour JACK run | Physical connections active and initial xrun behavior accepted |
 | 2026-08-03 | Week 2 evidence review | All raw logs, machine manifests, and exception notes present |
