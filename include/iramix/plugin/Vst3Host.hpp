@@ -92,6 +92,22 @@ public:
         float value
     ) noexcept;
 
+    // Queues a MIDI note for delivery on the next process() call, through
+    // the plugin's event bus — never by synthesizing audio directly.
+    // pitch is [0, 127] (12-TET, A3 = 440 Hz), velocity [0, 1]. False if
+    // the plugin refused to open, or the pending queue is full.
+    [[nodiscard]] bool sendNoteOn(
+        std::int16_t pitch,
+        float velocity,
+        std::int16_t channel = 0
+    ) noexcept;
+
+    [[nodiscard]] bool sendNoteOff(
+        std::int16_t pitch,
+        float velocity,
+        std::int16_t channel = 0
+    ) noexcept;
+
     // False when the project was built without IRAMIX_VST3_SDK_PATH, in
     // which case open() always fails and says so.
     [[nodiscard]] static bool available() noexcept;

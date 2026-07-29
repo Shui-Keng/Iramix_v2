@@ -319,6 +319,112 @@ constexpr std::uint32_t kStateCapacity = 65'536U;
         : EXIT_FAILURE;
 }
 
+// Proves MIDI reaches a real instrument, not an effect: an instrument
+// with no audio input bus produces silence until a note is played, so
+// audible output appearing only after sendMidiNoteOn() is direct
+// evidence the note reached the plugin's synthesis, not just the
+// transport. This is a stronger proof than the parameter probe's
+// state-blob diff, and only available because an instrument's silence
+// is guaranteed rather than assumed.
+[[nodiscard]] int runMidiProbe(
+    const std::filesystem::path& self,
+    const std::filesystem::path& target,
+    const std::uint32_t classIndex
+) {
+    namespace plugin = iramix::plugin;
+
+    plugin::PluginBridgeConfig config {
+        .maximumFrames = kFrames,
+        .channelCount = kChannels,
+        .deadline = std::chrono::milliseconds {20},
+        .maximumStateBytes = kStateCapacity,
+        .stateDeadline = std::chrono::milliseconds {250},
+        .parameterQueueCapacity = 0U,
+        .midiQueueCapacity = 16U,
+    };
+
+    std::string error;
+    auto bridge = plugin::PluginBridge::create(config, error);
+    if (bridge == nullptr) {
+        std::cout << "Plugin bridge midi: created=0, reason="
+                   << error << "\n";
+        return EXIT_FAILURE;
+    }
+    if (!bridge->startVst3(self, target, classIndex, kSampleRate, error)) {
+        std::cout << "Plugin bridge midi: started=0, reason="
+                   << error << "\n";
+        return EXIT_FAILURE;
+    }
+
+    const auto input = makeInput();
+    std::vector<float> output(input.size(), 0.0F);
+    if (!warmUp(*bridge, input, output)) {
+        std::cout
+            << "Plugin bridge midi: opened=0, "
+               "reason=child_exited_before_first_block\n";
+        return EXIT_FAILURE;
+    }
+
+    // Baseline: whatever silence (or lack of it) the plugin produces with
+    // no note played, on the same input this probe will keep using
+    // throughout — an instrument with no audio input bus ignores it.
+    double peakBeforeNote = 0.0;
+    for (int index = 0; index < 5; ++index) {
+        static_cast<void>(bridge->processBlock(input, output, kFrames));
+        peakBeforeNote = std::max(peakBeforeNote, peak(output));
+    }
+
+    constexpr std::int16_t pitch = 60; // middle C
+    const auto noteOnStatus = bridge->sendMidiNoteOn(
+        pitch,
+        0.8F,
+        bridge->samplePosition()
+    );
+
+    double peakAfterNoteOn = 0.0;
+    constexpr int soundingBlocks = 20;
+    for (int index = 0; index < soundingBlocks; ++index) {
+        static_cast<void>(bridge->processBlock(input, output, kFrames));
+        peakAfterNoteOn = std::max(peakAfterNoteOn, peak(output));
+    }
+
+    const auto noteOffStatus = bridge->sendMidiNoteOff(
+        pitch,
+        0.0F,
+        bridge->samplePosition()
+    );
+    for (int index = 0; index < 5; ++index) {
+        static_cast<void>(bridge->processBlock(input, output, kFrames));
+    }
+
+    const auto counters = bridge->counters();
+    bridge->stop();
+
+    std::cout
+        << "Plugin bridge midi: module=" << target.filename().string()
+        << ", pitch=" << pitch
+        << ", note_on_status="
+        << (noteOnStatus == plugin::PluginMidiStatus::accepted
+                ? "accepted"
+                : "rejected")
+        << ", note_off_status="
+        << (noteOffStatus == plugin::PluginMidiStatus::accepted
+                ? "accepted"
+                : "rejected")
+        << ", midi_events_sent=" << counters.midiEventsSent
+        << ", midi_events_applied=" << counters.midiEventsApplied
+        << ", peak_before_note=" << peakBeforeNote
+        << ", peak_after_note_on=" << peakAfterNoteOn
+        << ", sound_from_silence="
+        << (peakBeforeNote == 0.0 && peakAfterNoteOn > 0.0 ? 1 : 0)
+        << "\n";
+    return (noteOnStatus == plugin::PluginMidiStatus::accepted
+            && counters.midiEventsApplied > 0U
+            && peakAfterNoteOn > 0.0)
+        ? EXIT_SUCCESS
+        : EXIT_FAILURE;
+}
+
 } // namespace
 
 int main(const int argc, char* argv[]) {
@@ -356,7 +462,7 @@ int main(const int argc, char* argv[]) {
     if (argc < 2) {
         std::cerr
             << "usage: iramix_plugin_host <module-or-bundle> "
-               "[class-index] [--crash|--hang|--params]\n";
+               "[class-index] [--crash|--hang|--params|--midi]\n";
         return EXIT_FAILURE;
     }
 
@@ -364,12 +470,15 @@ int main(const int argc, char* argv[]) {
     std::uint32_t classIndex = 0U;
     std::string faultFlag;
     bool paramsFlag = false;
+    bool midiFlag = false;
     for (int index = 2; index < argc; ++index) {
         const std::string_view value {argv[index]};
         if (value == "--crash" || value == "--hang") {
             faultFlag = value;
         } else if (value == "--params") {
             paramsFlag = true;
+        } else if (value == "--midi") {
+            midiFlag = true;
         } else {
             classIndex = static_cast<std::uint32_t>(std::atoi(argv[index]));
         }
@@ -399,6 +508,13 @@ int main(const int argc, char* argv[]) {
     }
     if (paramsFlag) {
         return runParameterProbe(
+            std::filesystem::absolute(argv[0]),
+            target,
+            classIndex
+        );
+    }
+    if (midiFlag) {
+        return runMidiProbe(
             std::filesystem::absolute(argv[0]),
             target,
             classIndex

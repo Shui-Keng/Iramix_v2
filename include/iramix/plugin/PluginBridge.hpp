@@ -31,6 +31,12 @@ struct PluginBridgeConfig final {
     // queue that grows is a queue that allocates, and saturation must be a
     // counted outcome rather than an unbounded backlog.
     std::uint32_t parameterQueueCapacity {0U};
+    // Depth of the control-to-plugin MIDI queue, rounded up to a power of
+    // two. Zero disables MIDI transport. Same bounded-queue reasoning as
+    // parameterQueueCapacity; a separate capacity because a note burst and
+    // an automation burst saturate independently and neither should be
+    // able to starve the other.
+    std::uint32_t midiQueueCapacity {0U};
 };
 
 // Parameters the stand-in plugin exposes. A real plugin publishes its own
@@ -95,6 +101,12 @@ struct PluginBridgeCounters final {
     // Applied, but only after the block they were scheduled for had
     // already been rendered.
     std::uint64_t parametersLate {0U};
+    std::uint64_t midiEventsSent {0U};
+    std::uint64_t midiOverflows {0U};
+    std::uint64_t midiOutOfOrder {0U};
+    // Reported by the plugin process, not the host.
+    std::uint64_t midiEventsApplied {0U};
+    std::uint64_t midiEventsLate {0U};
 };
 
 enum class PluginParameterStatus : std::uint32_t {
@@ -105,6 +117,17 @@ enum class PluginParameterStatus : std::uint32_t {
     // The timestamp is earlier than one already queued.
     outOfOrder = 3U,
     // Not started, stopped, or configured without a parameter queue.
+    unavailable = 4U,
+};
+
+enum class PluginMidiStatus : std::uint32_t {
+    accepted = 1U,
+    // The queue is full. The caller decides what to do; the bridge does
+    // not silently drop the note.
+    queueFull = 2U,
+    // The timestamp is earlier than one already queued.
+    outOfOrder = 3U,
+    // Not started, stopped, or configured without a MIDI queue.
     unavailable = 4U,
 };
 
@@ -208,6 +231,25 @@ public:
         std::uint64_t sampleTime
     ) noexcept;
 
+    // Queues a MIDI note for a real plugin, delivered to the child's
+    // Vst3Host on its own event bus at the given sampleTime — never
+    // written into the plugin's state, and never applied by the
+    // stand-in, which has no MIDI concept. Same bounded, lock-free,
+    // ordered-delivery contract as setParameter(): a queue that grows is
+    // a queue that allocates, and out-of-order timestamps would make the
+    // rendered result depend on delivery order rather than the timeline.
+    [[nodiscard]] PluginMidiStatus sendMidiNoteOn(
+        std::int16_t pitch,
+        float velocity,
+        std::uint64_t sampleTime
+    ) noexcept;
+
+    [[nodiscard]] PluginMidiStatus sendMidiNoteOff(
+        std::int16_t pitch,
+        float velocity,
+        std::uint64_t sampleTime
+    ) noexcept;
+
     // Sample position of the next block. The bridge advances this by
     // frameCount on every processBlock() call, degraded ones included —
     // transport does not stop because a plugin missed its deadline. A real
@@ -258,6 +300,12 @@ private:
         const std::vector<std::string>& arguments,
         std::string& error
     );
+    [[nodiscard]] PluginMidiStatus enqueueMidiEvent(
+        std::uint8_t type,
+        std::int16_t pitch,
+        float velocity,
+        std::uint64_t sampleTime
+    ) noexcept;
     std::unique_ptr<Impl> impl_;
 };
 
