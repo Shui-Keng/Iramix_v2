@@ -83,6 +83,38 @@ present path does not clear a 60Hz budget with room to spare. Whether
 that is vsync pacing, present-mode overhead, or driver behavior on this
 specific hardware is not established here — only the counter is.
 
+## The first three-OS backend matrix
+
+This task also ran in hosted CI on all three operating systems as part of
+`gradle check`, which produced the first cross-platform backend
+identification — the exit item Week 4 asks for first:
+
+```text
+target=windows-x64 backend=DIRECT3D   (Windows CI, windows-2022, MSVC preset)
+target=macos-arm64 backend=METAL      (macOS CI, macos-latest)
+target=linux-x64   backend=SOFTWARE_FAST  (Ubuntu CI, under Xvfb)
+```
+
+Linux hosted runners have no display by default; the CI leg now installs
+`xvfb` and runs `xvfb-run -a gradle check` there specifically so this task
+has something to attach to. What it reports is real and worth recording
+precisely because it is not what the isolated slice above measured:
+**Skiko's `findNextWorkingRenderApi` fell back to software rendering
+under Xvfb**, since a virtual framebuffer exposes no real GPU. This is
+Skiko's documented fallback path working as intended, not a failure —
+and it is a different code path from the Windows/macOS hardware
+backends, so it should not be read as Linux-the-OS selecting software by
+nature, only as *this CI environment* having no GPU to select.
+
+Per R-13, only the Windows figure above is treated as performance
+evidence; the CI numbers (Windows MSVC/Debug: p50=16.6ms, p95=31.9ms;
+macOS: p50=16.7ms, p95=18.1ms; Linux/software: p50=15.5ms, p95=15.8ms)
+are recorded here only to show the task runs to completion and reports a
+distinct, correctly-identified backend on every leg — not compared
+against each other or against the reference-machine figures above, since
+CI hardware is uncontrolled and the Linux number is a different rendering
+path entirely.
+
 ## Evidence boundary
 
 This proves that a real `SkiaLayer` window opens, selects Direct3D on
@@ -93,11 +125,12 @@ tail.
 
 It does not prove:
 
-- **anything about macOS or Linux.** No `MetalRedrawer` or
-  `LinuxOpenGLRedrawer` path has run. Which backend Skiko selects on
-  those platforms — and whether Linux CI, which has no display by
-  default, can exercise this at all without a virtual display such as
-  Xvfb — is still open;
+- **that macOS or Linux hardware ever runs this.** CI confirms Skiko
+  selects Metal on a real macOS runner and reports frame times there,
+  but no `LinuxOpenGLRedrawer` path has ever run against a real GPU —
+  Ubuntu CI has none, so its evidence is the software-fallback path
+  only. Whether Linux with an actual GPU selects OpenGL and what that
+  costs remains unmeasured;
 - **anything about resize, monitor move, sleep/wake, or device loss.**
   The window is created once at a fixed size and never touched again.
   These are the remaining Week 4 exit items and are explicitly deferred
@@ -115,8 +148,9 @@ It does not prove:
   path and across vendors, so a byte-identity check would not be
   measuring anything stable. `RasterSpike`'s baseline remains the only
   pixel-correctness evidence Phase 0 has;
-- **that CI can run this at all.** The task is wired into `gradle
-  check`, but has not yet run there. Windows and macOS hosted runners
-  are expected to have an interactive session; Linux hosted runners have
-  none by default and will need a virtual display before this task can
-  produce anything but a headless skip on that leg.
+- **that CI frame-time numbers mean anything comparatively.** All three
+  CI legs complete without crashing and each reports a distinct,
+  correctly-identified backend, but hosted-runner hardware is
+  uncontrolled and the Linux leg is a different rendering path (software)
+  entirely — none of the three CI timings should be read against each
+  other or against the isolated Windows reference-machine figures above.
