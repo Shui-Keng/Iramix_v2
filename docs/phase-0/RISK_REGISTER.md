@@ -6,7 +6,7 @@ Scoring: probability and impact range from 1 to 5. Priority is their product.
 |---|---|---:|---:|---:|---|
 | R-01 | Scope exceeds available team capacity | 5 | 5 | 25 | Enforce the v1 scope contract and validate team size |
 | R-02 | Plugin crash or hang destabilizes audio | 4 | 5 | 20 | Bounded-deadline shared-memory bridge measured: host survives child crash and hang, degrading to counted silence. See `results/PLUGIN_PROCESS_ISOLATION_2026-07-28.md`. Isolation and real VST3 hosting are now joined: the bridge child can host a real plugin (`results/VST3_HOSTING_IN_BRIDGE_CHILD_2026-07-29.md`), three third-party plugins verified, 532/532 blocks each. That work added a third reason for isolation beyond crash and hang: a Pure Data based plugin writes its banner to **stdout**, which is the transport P0-007 uses for the Java/C++ boundary, so an in-process plugin would corrupt the protocol rather than crash it. Crash/hang recovery is now also proven against real plugins: `results/VST3_CRASH_HANG_RECOVERY_2026-07-29.md` injects the same fault after three genuine blocks of real DSP, against two third-party plugins, both fault kinds. `testPluginProcessTermination`/`testPluginProcessHang` still cover the stand-in only in `ctest`, since the real-plugin variant depends on a locally installed plugin no CI runner has |
-| R-03 | Skiko/Skia GPU behavior differs substantially by OS | 4 | 4 | 16 | Run one renderer and device-loss spike per OS. **Partially open.** Slice 1 (`results/SKIA_GPU_BACKEND_FRAMETIME_2026-07-29.md`) landed a backend matrix across all three CI OSes: Direct3D on Windows, Metal on macOS, and Skiko's software fallback under Xvfb on Ubuntu CI. The Windows reference-machine median sits at the 60 Hz budget line (16.6ms) and misses 120 Hz; p99 widens from 28ms isolated to 67ms under `gradle check`. Slice 2 (`results/SKIA_GPU_RESIZE_MONITOR_RECOVERY_2026-07-29.md`) covers resize locally and in hosted CI: a continuously rendering window completed nine sizes/eight transitions with no crash, exception, timeout, or hang on Direct3D, Metal, and Ubuntu/Xvfb software; hosted runs completed 45, 30, and 28 backend presents respectively. **Monitor movement is not done:** the local machine and every hosted UI job expose one `GraphicsDevice`, and the task reports `LIMITATION_SINGLE_MONITOR` rather than claiming a same-device move proves recovery. A real Linux GPU backend, cross-monitor/mixed-DPI recovery, sleep/wake, and device loss are still unmeasured |
+| R-03 | Skiko/Skia GPU behavior differs substantially by OS | 4 | 4 | 16 | Run one renderer and device-loss spike per OS. **Partially open.** Slice 1 (`results/SKIA_GPU_BACKEND_FRAMETIME_2026-07-29.md`) landed a backend matrix across all three CI OSes: Direct3D on Windows, Metal on macOS, and Skiko's software fallback under Xvfb on Ubuntu CI. The Windows reference-machine median sits at the 60 Hz budget line (16.6ms) and misses 120 Hz; p99 widens from 28ms isolated to 67ms under `gradle check`. Slice 2 (`results/SKIA_GPU_RESIZE_MONITOR_RECOVERY_2026-07-29.md`) covers resize locally and in hosted CI: a continuously rendering window completed nine sizes/eight transitions with no crash, exception, timeout, or hang on Direct3D, Metal, and Ubuntu/Xvfb software. **Monitor movement is not done:** every available environment exposes one `GraphicsDevice`, and the task reports `LIMITATION_SINGLE_MONITOR`. Slice 3 (`results/SKIA_GPU_CONTEXT_RECREATION_PROXY_2026-07-29.md`) disposes/reinitializes the same SkiaLayer backend five times locally; each new Direct3D context initializes and resumes completed presents. It is explicitly a `CONTEXT_RECREATE_PROXY`. **Literal OS sleep/wake is accepted as a Phase 0 evidence gap**, because safely suspending and resuming the host cannot be automated by a normal CI/test process; see "Literal sleep/wake coverage gap." A real Linux GPU backend, cross-monitor/mixed-DPI recovery, and device loss are still unmeasured |
 | R-04 | Linux plugin editors fail under Wayland | 4 | 4 | 16 | **Cannot be closed in Phase 0: no Linux hardware (see R-13).** Native Wayland has no cross-client reparenting mechanism at all, so the generic-editor fallback is a requirement rather than a contingency. See `results/PLUGIN_EDITOR_EMBEDDING_RISK_2026-07-29.md` |
 | R-05 | Multicore graph scheduling misses deadlines | 3 | 5 | 15 | Stabilize single coordinator first; benchmark graph partitions |
 | R-06 | Project corruption destroys user work | 2 | 5 | 10 | Journaled commands, atomic saves, and forced-crash drills |
@@ -63,6 +63,30 @@ Closing them requires borrowed, rented, or purchased hardware on both
 platforms; it cannot be closed by additional work on the existing machine.
 This acceptance covers Phase 0 only and should be revisited when Phase 1
 scope is committed.
+
+## Literal sleep/wake coverage gap
+
+**Status: accepted as a Phase 0 evidence gap on 2026-07-29.**
+
+R-03 calls for renderer recovery across sleep/wake, but an ordinary test
+cannot safely suspend the operating system that owns the test process,
+its timeout, its logs, and its CI agent. Hosted runners do not expose a
+contract for guest-driven host suspend/resume, and forcing sleep on a
+development machine from `gradle check` could interrupt unrelated work or
+leave the run unobservable.
+
+### Accepted position
+
+Phase 0 uses deterministic Skiko context disposal/recreation as a bounded
+**proxy**, and labels it as such in both code output and the result
+document. Literal OS sleep/wake is not inferred from that proxy and is not
+marked done.
+
+Closing the literal gap requires a controlled physical-machine run with
+an out-of-band wake mechanism and logging that survives the interruption.
+That manual hardware exercise is deferred beyond automated Phase 0
+gating. This acceptance does not cover device loss, monitor movement, or
+mixed-DPI recovery; those retain their own evidence boundaries.
 
 ## ASIO administrative and trademark note
 
