@@ -34,9 +34,9 @@ jobs:
         with:
           gradle-version: "9.6.1"
 
-      - name: Install JACK development package
+      - name: Install JACK development package and Xvfb
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libjack-jackd2-dev
+        run: sudo apt-get update && sudo apt-get install -y libjack-jackd2-dev xvfb
 
       - name: Configure
         run: cmake --preset ${{ matrix.preset }}
@@ -48,7 +48,16 @@ jobs:
         run: ctest --preset ${{ matrix.preset }}
 
       - name: Build and test Java UI and engine handshake
+        if: runner.os != 'Linux'
         run: gradle check
+        env:
+          IRAMIX_ENGINE_PROBE: ${{ github.workspace }}/${{ matrix.engine_probe }}
+
+      - name: Build and test Java UI and engine handshake (Xvfb)
+        # gpuSpike opens a real SkiaLayer window; Linux runners have no
+        # display by default, unlike the Windows/macOS hosted sessions.
+        if: runner.os == 'Linux'
+        run: xvfb-run -a gradle check
         env:
           IRAMIX_ENGINE_PROBE: ${{ github.workspace }}/${{ matrix.engine_probe }}
 

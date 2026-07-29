@@ -100,12 +100,29 @@ tasks.register("rasterSpike", JavaExec) {
     }
 }
 
+tasks.register("gpuSpike", JavaExec) {
+    group = "verification"
+    description = "Measures dense-arrangement frame time on Skiko's " +
+        "hardware-accelerated SkiaLayer and records the GPU backend " +
+        "actually selected."
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = "com.iramix.ui.tools.GpuSpike"
+    // Unlike rasterSpike, this opens a real window and needs a real
+    // (or virtual, e.g. Xvfb) display; it must not force headless.
+    environment "IRAMIX_SKIKO_TARGET", skikoTarget
+}
+
 tasks.named("ipcLoadTest") {
     mustRunAfter("architectureSmoke")
 }
 
 tasks.named("check") {
-    dependsOn("architectureSmoke", "ipcLoadTest", "rasterSpike")
+    dependsOn(
+        "architectureSmoke",
+        "ipcLoadTest",
+        "rasterSpike",
+        "gpuSpike"
+    )
 }
 
 dependencyLocking {
