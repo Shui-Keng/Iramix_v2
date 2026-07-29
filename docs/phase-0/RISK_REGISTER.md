@@ -19,23 +19,66 @@ Scoring: probability and impact range from 1 to 5. Priority is their product.
 | R-13 | No macOS or Linux hardware is available to the project | 5 | 4 | 20 | **Accepted for Phase 0.** Hosted three-OS CI covers portability, correctness, and sanitizers; performance evidence is Windows-only by decision. See "Reference-hardware coverage gap" |
 | R-14 | Redistributing third-party binaries without required attribution | 2 | 4 | 8 | Skiko runtime jars ship Skia and ICU binaries with no notice file; obligations L-1 to L-4 tracked in `DEPENDENCIES.md` and gated before any distributable build |
 | R-15 | No native hardware audio interface is available, so the 64-frame latency budget cannot be validated | 5 | 4 | 20 | **Accepted for Phase 0.** Measured, not assumed: `results/AUDIO_CALLBACK_64_FRAME_FEASIBILITY_2026-07-29.md` shows WASAPI's default endpoint on the reference machine reports one legal engine period (min = max = fundamental = 512 frames) and rejects both 64 and 128 in shared and exclusive mode, while ASIO4ALL v2 opens 64 but sustains 83.448% of nominal callbacks with 705–1,632 late wakeups in every one of ten equal windows — steady-state, not startup. The engine is not the constraint: p99 callback duration at 64 frames is 0.0129 ms against a 0.93 ms budget, with zero target and zero hard deadline misses. See "64-frame buffer coverage gap" |
+| R-16 | No access to target users, so the product brief and v1 scope stay unvalidated | 5 | 4 | 20 | **Accepted for Phase 0 on 2026-07-29.** The project has no reachable composers or sound designers to interview, so P0-009 is closed as unachievable rather than left pending. Impact is scored 4 rather than 5 because building against unvalidated workflow assumptions is serious and recoverable — v1 scope can be re-cut in a later phase — not a technical failure mode. See "User-research coverage gap" |
 
 ## Critical escalation rule
 
 Any risk with priority 16 or above must have measured evidence or an accepted
 fallback before Phase 1 begins.
 
-**Rule status as of the 2026-07-29 exit review: two of seven fail it.**
+**Rule status as of the 2026-07-29 exit review: two of eight fail it.**
 
 | Risk | Priority | Rule satisfied? |
 |---|---:|---|
 | R-01 Scope exceeds available team capacity | 25 | **No** — no team size is recorded, so the risk cannot even be evaluated, and the v1 scope contract has not been enforced against one |
 | R-10 Custom UI consumes capacity needed by audio engine | 16 | **No** — no widget-set limit is declared and no delivery velocity was measured at week 4 or since |
-| R-02, R-03, R-04, R-13, R-15 | 20/16/16/20/20 | Yes — measured evidence or an explicitly recorded acceptance |
+| R-02, R-03, R-04, R-13, R-15, R-16 | 20/16/16/20/20/20 | Yes — measured evidence or an explicitly recorded acceptance |
 
 Both failures are capacity questions rather than technical ones, and
 neither is blocked by absent hardware. See
 [`EXIT_REVIEW.md`](EXIT_REVIEW.md).
+
+## User-research coverage gap
+
+**Status: accepted as a Phase 0 risk on 2026-07-29.**
+
+R-16 is an access constraint, not an open engineering task. The project
+has no reachable composers or sound designers, so the Week 1 activity
+("review the product brief with at least three composers and three sound
+designers") and P0-009 cannot be performed. They are closed as
+unachievable rather than carried as tasks that would never be ticked —
+the same treatment R-13 and R-15 receive for absent hardware.
+
+### What this actually costs
+
+Unlike the hardware gaps, nothing here is recoverable by buying
+equipment, and the cost is not evenly spread:
+
+1. **The product brief and v1 scope stay drafts.** They were written as
+   hypotheses to be tested. Untested, they are still hypotheses, and any
+   later document that calls them "validated" is wrong.
+2. **R-01 loses its main instrument.** Its response is "enforce the v1
+   scope contract" — enforcing a contract nobody validated only bounds
+   effort, it does not aim it.
+3. **The top-ten workflow problem ranking does not exist**, so Phase 1
+   feature priority has no user-derived ordering behind it.
+
+### What it does not cost
+
+Interaction prototypes are **not** blocked by this. Building the
+arrangement, mixer, launcher, and device panel prototypes still de-risks
+the renderer, the input model, and the widget-set question in R-10, and
+none of that needs an interviewee. Only *testing them with users* is
+blocked. The Phase 1 backlog keeps that item for this reason.
+
+### Accepted position
+
+Phase 1 proceeds against an unvalidated product brief, deliberately.
+Every scope decision inherits that, and the honest phrasing everywhere
+downstream is "assumed" rather than "validated". Revisit if a route to
+target users ever opens; the interviews are cheap once someone is
+reachable, and they are the only thing that converts the brief from a
+hypothesis into evidence.
 
 ## Reference-hardware coverage gap
 

@@ -8,9 +8,9 @@ evidence boundary those documents declare.
 
 Phase 0's **technical** validation is done, and the architecture it was
 built to test is safe to commit to. Phase 0 **as specified** is not done:
-three of its ten required outputs depend on user research that has never
-started, and two of the seven risks at priority 16 or above have neither
-measured evidence nor an accepted fallback.
+its product validation cannot be performed at all (R-16, accepted), no
+interaction prototypes exist, and two of the eight risks at priority 16
+or above have neither measured evidence nor an accepted fallback.
 
 Recommended decision: **begin Phase 1 engineering on the validated
 architecture, and do not mark Phase 0 complete.** The two are separable.
@@ -21,7 +21,9 @@ writing more code.
 The distinction matters because the gap is not where a reader would
 guess. The engine, persistence, and plugin layers carry more evidence
 than Phase 0 asked for. The product brief this was all built to serve has
-never been shown to a composer.
+never been shown to a composer, and now — R-16 accepted — will not be
+during Phase 0. Every scope decision downstream inherits that, and the
+honest word for the brief is "assumed", never "validated".
 
 ## Required outputs
 
@@ -30,8 +32,8 @@ than activity.
 
 | # | Required output | Status |
 |---|---|---|
-| 1 | Validated product brief and v1 scope | **Not met.** Drafts exist (`docs/product/`), but "validated" meant interviews with three composers and three sound designers. P0-009 never started. The brief itself says these questions require interviews and prototype tests during Phase 0 |
-| 2 | Interaction prototypes for arrangement, mixer, launcher, device panel | **Not met.** None exist. The raster spike renders a dense arrangement *scene* as a rendering fixture; it is not an interaction prototype and was never presented as one |
+| 1 | Validated product brief and v1 scope | **Unachievable; accepted as R-16 (2026-07-29).** Drafts exist (`docs/product/`), but "validated" meant interviews with three composers and three sound designers, and the project has no reachable target users. The brief and scope remain hypotheses, permanently for Phase 0 |
+| 2 | Interaction prototypes for arrangement, mixer, launcher, device panel | **Not met, and not blocked.** None exist. The raster spike renders a dense arrangement *scene* as a rendering fixture; it is not an interaction prototype and was never presented as one. R-16 removes only the *user testing* of prototypes, not the building of them |
 | 3 | Audio callback spike on all three operating systems | **Windows only.** Core Audio and JACK probes are written but have never run on target hardware (R-13, accepted) |
 | 4 | Skia rendering spike on all three operating systems | **Met**, with declared limits: raster is bit-identical and guarded on all three CI OSes; GPU backend identification covers Direct3D, Metal, and — because hosted Linux has no display — Skiko's software fallback under Xvfb. No real Linux GPU has ever run it |
 | 5 | Immutable audio-graph spike | **Met**, and exceeded. See ADR-0003 below |
@@ -41,8 +43,16 @@ than activity.
 | 9 | Architecture decisions and risk register | **Met** |
 | 10 | Phase 1 backlog with estimates and owners | **Partially met.** [`PHASE_1_BACKLOG.md`](PHASE_1_BACKLOG.md) delivers the backlog with structural sizing. **Owners are unassigned** — this project has no recorded team, which is itself the subject of R-01 |
 
-Six met, one partial, three not met. All three unmet outputs are product
-or user research; none is blocked by engineering.
+Six met, one partial, one accepted as unachievable (R-16), two not met.
+None of the shortfalls is blocked by engineering.
+
+**Amended 2026-07-29, after this review was first written.** Two
+decisions landed: ADR-0003 was accepted for Windows Tier-1, and the user
+interviews were closed as unachievable and accepted as R-16 rather than
+carried as a pending task. The verdict below is unchanged by them — the
+interviews moving from "not started" to "cannot be done" changes who is
+accountable for the gap, not whether the gap exists. The product brief is
+still a hypothesis, and Phase 1 still inherits that.
 
 ## Risks at priority 16 and above
 
@@ -94,8 +104,13 @@ The decision is worth taking rather than deferring. The immutable-plan
 design is now load-bearing for the persistence, plugin, and device layers
 built on top of it; leaving it "proposed" while shipping Phase 1 against
 it would be a fiction. But accepting it is a project decision, not a
-measurement, so it is recorded here as a recommendation for sign-off
-rather than applied unilaterally.
+measurement, so it was recorded as a recommendation for sign-off rather
+than applied unilaterally.
+
+**Signed off 2026-07-29: accepted on those terms.** Both qualifications
+stand — acceptance is a decision about risk tolerance, not a substitute
+for the two measurements that are still missing. They are tracked as
+P1-E2 and P1-D1/P1-D3.
 
 ## What Phase 0 proved
 
@@ -141,10 +156,16 @@ sleep/wake (context recreation stands in); device loss and TDR (a managed
 environment has one `GraphicsDevice`). Each is labelled in its own result
 document and none is claimed as the real thing.
 
-**Simply not attempted.** User interviews; interaction prototypes; team
-capacity; a widget-set limit; delivery velocity. These are the ones worth
-noticing, because no hardware and no proxy is standing between the
-project and doing them.
+**Simply not attempted.** Interaction prototypes; team capacity; a
+widget-set limit; delivery velocity. These are the ones worth noticing,
+because nothing is standing between the project and doing them — not
+hardware, not a proxy, and not R-16, which blocks only the *testing* of
+prototypes with users and none of the other three.
+
+**Blocked by absent access, accepted (R-16).** User interviews, and with
+them the validation of the product brief and v1 scope and any
+user-derived ranking of workflow problems. Unlike the hardware gaps this
+one cannot be bought out of.
 
 **Known-open engineering, small.** Four licensing obligations (L-1 to
 L-4) gating any distributable build; repeated topology churn under a live

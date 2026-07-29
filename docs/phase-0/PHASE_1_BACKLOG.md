@@ -26,14 +26,21 @@ complete, and they gate scope decisions rather than code.
 
 | ID | Item | Size | Traces to |
 |---|---|---|---|
-| P1-A1 | Interview three composers and three sound designers; rank the top ten workflow problems | M | P0-009, required output 1 |
-| P1-A2 | Build low-fidelity interaction prototypes for arrangement, mixer, launcher, and device panel; test them in the same sessions | M | Required output 2 |
+| ~~P1-A1~~ | ~~Interview three composers and three sound designers; rank the top ten workflow problems~~ — **withdrawn 2026-07-29**: no target users are reachable, accepted as R-16 | — | P0-009, required output 1 |
+| P1-A2 | Build low-fidelity interaction prototypes for arrangement, mixer, launcher, and device panel | M | Required output 2 |
 | P1-A3 | Record actual team size and available capacity; re-score or close R-01 | S | R-01, priority 25, fails the escalation rule |
 | P1-A4 | Declare a v1 widget-set limit and start measuring delivery velocity against it | S | R-10, priority 16, fails the escalation rule |
 
-A1 and A2 belong in one activity: the prototypes are what make the
-interviews worth running, and the interviews are what the brief says the
-prototypes are for.
+P1-A2 survives A1's withdrawal on its own merits. It was originally
+paired with the interviews, but the prototypes de-risk the renderer, the
+input model, and the widget-set question in R-10, and none of that needs
+an interviewee. What it no longer delivers is validation: without users
+the prototypes test whether the *toolkit* can express the workspace, not
+whether the workspace is the right one.
+
+A3 and A4 are the only remaining items in this group that can close a
+priority-16+ risk, which makes them cheap and disproportionately
+valuable.
 
 ## P1-B — Distribution gates
 
@@ -87,8 +94,14 @@ purchase or a borrow before it becomes a task.
 
 ## Sequencing note
 
-P1-B is independent and can run at any time. P1-A gates scope, so it
-should precede P1-C4 and any commitment about v1 contents. P1-D cannot
-start at all without hardware. P1-C1, P1-E1, and P1-E2 are the items
-where the existing evidence is closest to running out, so they are the
-natural first engineering work if Phase 1 starts before P1-A completes.
+P1-B is independent and can run at any time. P1-D cannot start at all
+without hardware. P1-C1, P1-E1, and P1-E2 are the items where the
+existing evidence is closest to running out, so they are the natural
+first engineering work.
+
+P1-A no longer gates scope the way it was written to. With A1 withdrawn
+under R-16, nothing in the backlog can validate the v1 scope, so v1
+contents will be committed on assumption. That is the accepted position,
+not an oversight — but it means P1-C4 (the real workspace UI) is the
+largest item in this backlog and the one built on the least evidence.
+Doing P1-A2 first is the cheapest available hedge.
