@@ -1,7 +1,10 @@
 # ADR-0003: Immutable Real-time Render Plans
 
-Status: Proposed; Tier-1 Windows live integration implemented  
-Date: 2026-07-27
+Status: **Accepted for Windows Tier-1** on 2026-07-29, with two recorded
+qualifications (see "Exit-review status" below): latency compensation
+after routing changes is verified only on a graph-level fixture, and the
+macOS and Linux backends are unmeasured.  
+Date: 2026-07-27; accepted 2026-07-29
 
 ## Context
 
@@ -74,6 +77,11 @@ the project has no such hardware (R-13, accepted).
 [`../phase-0/EXIT_REVIEW.md`](../phase-0/EXIT_REVIEW.md) therefore
 recommends accepting this ADR for **Windows Tier-1**, carrying two
 qualifications: PDC after routing changes is fixture-level only, and
-macOS/Linux backends are unmeasured. Accepting an ADR is a project
-decision rather than a measurement, so the status above stays *Proposed*
-until that sign-off is recorded here.
+macOS/Linux backends are unmeasured.
+
+**Sign-off recorded 2026-07-29:** accepted on those terms as a project
+decision. Both qualifications stand as written — acceptance does not
+convert them into evidence. Closing them is tracked as P1-E2 (full plugin
+PDC case) and P1-D1/P1-D3 (macOS and Linux backends, blocked by R-13).
+If either turns out worse than the fixture suggests, this ADR is the
+document that has to change, not the result documents.
