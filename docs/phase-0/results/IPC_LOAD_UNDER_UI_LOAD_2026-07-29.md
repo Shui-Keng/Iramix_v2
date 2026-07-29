@@ -16,24 +16,86 @@ It also records a measurement defect found on 2026-07-29: the task's UI
 frame assertion was racy, and the fix narrowed what that assertion is
 allowed to claim.
 
+**The concurrent render thread is starved by that traffic, by 1.6× on
+Ubuntu, 8.1× on Windows, and 29.6× on macOS.** That finding came out
+of investigating the flake and is the more consequential half of this
+document.
+
 ## What the frame counter does and does not evidence
 
 `uiFrames` counts frames the dummy render thread *completed* inside the
 measurement window. It is easy to read as a UI-responsiveness figure. It
 is not one, and the measurements below are the reason.
 
-The window is the wall time of 1,000 pings — 85–376 ms observed. A
-completed raster frame of the 200-track scene costs roughly 20–40 ms
-on macOS CI and 14–27 ms on the Windows reference machine. The window
-is therefore only a handful of frame periods wide, and on the shortest
-observed macOS window (85 ms) it is barely two.
+The window is the wall time of 1,000 pings — 85–376 ms observed. The
+frame period under that load is 3–56 ms depending on environment, so
+the window is only a handful of frame periods wide, and on the
+shortest observed macOS window (85 ms) it is barely two.
 
-Consequently `uiFrames` swings between 0 and 43 on identical code,
-driven by runner scheduling rather than by anything the IPC path does.
-The counter is retained because a wedged render thread is still worth
-catching, but **it is a liveness signal, not a frame-rate measurement**,
-and it must not be quoted as one. The `window=` field is printed
-alongside it so the margin is visible without re-deriving it from CI.
+Consequently `uiFrames` swings between 0 and 50 on identical code. The
+counter is retained because a wedged render thread is still worth
+catching, but **it is a liveness signal, not a frame-rate
+measurement**, and it must not be quoted as one. The `window=` field is
+printed alongside it so the margin is visible without re-deriving it
+from CI.
+
+An earlier revision of this document inferred the frame *cost* from
+`window ÷ uiFrames` and reported 14–40 ms. That was wrong: it
+measured the period under load and attributed it to the scene. The idle
+baseline added on 2026-07-29 shows the scene actually costs 1.4–1.9 ms
+per frame. The difference between those two numbers is the finding
+below, not a property of the scene.
+
+## The render thread starves under saturated IPC traffic
+
+The task samples `BASELINE_FRAMES` frames with the IPC path unloaded
+before the window opens, and reports that period next to the one
+observed during the window. The pair is reported, never asserted
+against a threshold — see "Why no ratio assertion" below.
+
+Push run
+[`30463235592`](https://github.com/Shui-Keng/Iramix_v2/actions/runs/30463235592):
+
+| Environment | Idle period | Under-load period | Factor | uiFrames |
+|---|---:|---:|---:|---:|
+| Ubuntu x64 | 1.859 ms | 3.053 ms | 1.6× | 50 |
+| Windows 2022 x64 | 1.370 ms | 11.153 ms | 8.1× | 18 |
+| macOS arm64 | 1.887 ms | 55.777 ms | 29.6× | 3 |
+
+The idle cost of the scene is effectively the same on all three
+environments. What differs by an order of magnitude is how much of the
+render thread survives a control thread issuing 1,000 back-to-back
+blocking pings.
+
+This is the mechanism behind the macOS-only flake documented below.
+The frame counter never failed on Ubuntu or Windows because their
+render loops keep completing 18–50 frames per window; macOS completes
+0–13, so it is the only environment where the count can reach zero.
+The original assertion was not measuring an IPC defect — it was
+sampling a scheduling difference too finely to be stable.
+
+**The cause of that difference is not established here.** The scene is
+CPU raster with no GPU involvement, so the candidates are OS thread
+scheduling, JVM thread priority, and the blocking-read behaviour of the
+stdio transport on each platform. This task distinguishes none of them.
+
+Note also that the idle baseline is not a machine-independent constant:
+inside a full `gradle check` on the Windows reference machine, sharing
+the host with the GPU and raster spikes, it rose from ~3 ms to
+17.276 ms. That is the intended behaviour — the baseline is a local
+control measured under the same contention as the window, which is why
+it is measured per run rather than assumed.
+
+### Why no ratio assertion
+
+Reporting these as counters rather than asserting a ratio is
+deliberate. The under-load period is `window ÷ uiFrames`, and
+`uiFrames` can legitimately be 1 — or 0, in which case the task
+reports `framePeriodUnderLoad=UNRESOLVED` rather than a fabricated
+number. A
+threshold over a quantity that coarse would reintroduce exactly the
+flakiness this task had just removed, in a form that is harder to
+diagnose. Interpreting the pair is left to the reader.
 
 ## The race and what changed
 
@@ -88,10 +150,15 @@ platform thread rendering a 1920×1080 raster scene of 200 tracks ×
 The sequence is:
 
 1. 100 warmup pings, discarded;
-2. a bounded 10 s wait for the render loop to advance one frame;
+2. a bounded 10 s sample of 8 baseline frames, which both proves the
+   render loop is advancing and measures the idle frame period;
 3. 1,000 measured pings, each timed individually;
 4. the in-window frame delta, with the bounded drain above if it is
    zero.
+
+The baseline period is divided by the frame count actually observed,
+not by the requested 8, since the loop can complete further frames
+between the wake-up and the read.
 
 Latency percentiles are nearest-rank over 1,000 samples, so p99 has ten
 samples above it — unlike the 20-sample spikes elsewhere in this
@@ -115,49 +182,63 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/gradle.ps1 :ui:d
 Observed output over four consecutive runs:
 
 ```text
-IPC load test: os=Windows commands=1000 warmup=100 uiFrames=20 uiFrameEvidence=IN_WINDOW window=207.785ms p50=0.104ms p95=0.297ms p99=2.491ms max=17.469ms
-IPC load test: os=Windows commands=1000 warmup=100 uiFrames=11 uiFrameEvidence=IN_WINDOW window=182.822ms p50=0.110ms p95=0.304ms p99=1.189ms max=15.151ms
-IPC load test: os=Windows commands=1000 warmup=100 uiFrames=14 uiFrameEvidence=IN_WINDOW window=199.908ms p50=0.094ms p95=0.300ms p99=1.491ms max=19.659ms
-IPC load test: os=Windows commands=1000 warmup=100 uiFrames=10 uiFrameEvidence=IN_WINDOW window=193.078ms p50=0.112ms p95=0.339ms p99=1.729ms max=17.791ms
+IPC load test: os=Windows commands=1000 warmup=100 uiFrames=6 uiFrameEvidence=IN_WINDOW window=174.475ms baselineFrames=8 framePeriodIdle=2.754ms framePeriodUnderLoad=29.079ms p50=0.093ms p95=0.376ms p99=1.824ms max=14.592ms
+IPC load test: os=Windows commands=1000 warmup=100 uiFrames=7 uiFrameEvidence=IN_WINDOW window=199.873ms baselineFrames=8 framePeriodIdle=3.591ms framePeriodUnderLoad=28.553ms p50=0.103ms p95=0.434ms p99=1.725ms max=11.091ms
+IPC load test: os=Windows commands=1000 warmup=100 uiFrames=10 uiFrameEvidence=IN_WINDOW window=181.548ms baselineFrames=8 framePeriodIdle=3.809ms framePeriodUnderLoad=18.155ms p50=0.097ms p95=0.461ms p99=1.615ms max=14.626ms
+IPC load test: os=Windows commands=1000 warmup=100 uiFrames=8 uiFrameEvidence=IN_WINDOW window=241.956ms baselineFrames=8 framePeriodIdle=3.447ms framePeriodUnderLoad=30.245ms p50=0.077ms p95=0.518ms p99=2.249ms max=32.081ms
 ```
 
 Within a full `gradle check`, sharing the machine with the GPU and
-raster spikes, the same task reported a materially wider tail:
+raster spikes, the same task reported a wider tail — and an idle
+baseline five times higher, since the baseline records that contention
+too:
 
 ```text
-IPC load test: os=Windows commands=1000 warmup=100 uiFrames=14 uiFrameEvidence=IN_WINDOW window=375.642ms p50=0.101ms p95=0.806ms p99=5.348ms max=45.246ms
+IPC load test: os=Windows commands=1000 warmup=100 uiFrames=7 uiFrameEvidence=IN_WINDOW window=187.225ms baselineFrames=8 framePeriodIdle=17.276ms framePeriodUnderLoad=26.746ms p50=0.091ms p95=0.333ms p99=1.862ms max=25.041ms
 ```
 
-The median is stable under that contention; the tail is not. No
-attribution for the tail was attempted — GC counters are not collected
-by this task, unlike the raster and GPU spikes.
+The median ping latency is stable under that contention; the tail is
+not. No attribution for the tail was attempted — GC counters are not
+collected by this task, unlike the raster and GPU spikes.
+
+Earlier runs on this machine, before the baseline counters existed,
+reported `uiFrames` of 20/11/14/10 over comparable windows. Those runs
+are not comparable to the four above: sampling eight baseline frames
+before the window shifts where the loop is in its cycle when the pings
+start.
 
 ## CI integration
 
 `ipcLoadTest` is part of `gradle check` on all three OS build jobs, each
 with `IRAMIX_ENGINE_PROBE` pointing at the engine probe built earlier in
 the same job. Push run
-[`30460701335`](https://github.com/Shui-Keng/Iramix_v2/actions/runs/30460701335)
+[`30463235592`](https://github.com/Shui-Keng/Iramix_v2/actions/runs/30463235592)
 completed all five jobs successfully:
 
 | Environment | uiFrames | Evidence | Window | p50 | p95 | p99 | max |
 |---|---:|---|---:|---:|---:|---:|---:|
-| Ubuntu x64 | 43 | IN_WINDOW | 109.373 ms | 0.077 ms | 0.187 ms | 0.934 ms | 2.229 ms |
-| Windows 2022 x64 | 13 | IN_WINDOW | 182.279 ms | 0.127 ms | 0.212 ms | 0.667 ms | 2.076 ms |
-| macOS arm64 | 11 | IN_WINDOW | 216.906 ms | 0.061 ms | 0.644 ms | 3.769 ms | 16.413 ms |
+| Ubuntu x64 | 50 | IN_WINDOW | 152.648 ms | 0.099 ms | 0.198 ms | 2.181 ms | 4.326 ms |
+| Windows 2022 x64 | 18 | IN_WINDOW | 200.761 ms | 0.121 ms | 0.320 ms | 1.646 ms | 20.975 ms |
+| macOS arm64 | 3 | IN_WINDOW | 167.332 ms | 0.047 ms | 0.239 ms | 2.504 ms | 55.985 ms |
 
 Exact task output:
 
 ```text
-IPC load test: os=Linux commands=1000 warmup=100 uiFrames=43 uiFrameEvidence=IN_WINDOW window=109.373ms p50=0.077ms p95=0.187ms p99=0.934ms max=2.229ms
-IPC load test: os=Windows commands=1000 warmup=100 uiFrames=13 uiFrameEvidence=IN_WINDOW window=182.279ms p50=0.127ms p95=0.212ms p99=0.667ms max=2.076ms
-IPC load test: os=macOS commands=1000 warmup=100 uiFrames=11 uiFrameEvidence=IN_WINDOW window=216.906ms p50=0.061ms p95=0.644ms p99=3.769ms max=16.413ms
+IPC load test: os=Linux commands=1000 warmup=100 uiFrames=50 uiFrameEvidence=IN_WINDOW window=152.648ms baselineFrames=8 framePeriodIdle=1.859ms framePeriodUnderLoad=3.053ms p50=0.099ms p95=0.198ms p99=2.181ms max=4.326ms
+IPC load test: os=Windows commands=1000 warmup=100 uiFrames=18 uiFrameEvidence=IN_WINDOW window=200.761ms baselineFrames=8 framePeriodIdle=1.370ms framePeriodUnderLoad=11.153ms p50=0.121ms p95=0.320ms p99=1.646ms max=20.975ms
+IPC load test: os=macOS commands=1000 warmup=100 uiFrames=3 uiFrameEvidence=IN_WINDOW window=167.332ms baselineFrames=8 framePeriodIdle=1.887ms framePeriodUnderLoad=55.777ms p50=0.047ms p95=0.239ms p99=2.504ms max=55.985ms
 ```
 
 The three environments use different toolchains (MSVC Debug, AppleClang
 Debug, GCC Debug) and different runner hardware. The rows are **not** a
-performance comparison between operating systems and must not be read as
-one.
+performance comparison between operating systems and must not be read
+as one. The idle-versus-under-load *factor* within a single row is a
+within-environment comparison and does not have that problem.
+
+The preceding run
+[`30460701335`](https://github.com/Shui-Keng/Iramix_v2/actions/runs/30460701335),
+before the baseline counters existed, reported `uiFrames` of 43
+(Ubuntu), 13 (Windows), and 11 (macOS) over 109–217 ms windows.
 
 ## macOS rerun sample
 
@@ -188,15 +269,27 @@ This slice proves only that:
 - 1,000 sequential ping commands complete over the Phase 0 stdio
   transport against a live engine child process, on the Windows
   reference machine and all three hosted CI operating systems;
-- median round-trip latency is 0.061–0.127 ms in Debug builds under a
-  concurrent Skia raster load; and
-- the dummy render loop is not wedged by that IPC traffic.
+- median round-trip latency is 0.047–0.127 ms in Debug builds under a
+  concurrent Skia raster load;
+- the dummy render loop is not wedged by that IPC traffic; and
+- that same loop is nonetheless slowed by it, by a factor that differs
+  per environment and reached 29.6× on hosted macOS.
 
 It does **not** prove:
 
 - any UI frame rate or responsiveness figure — `uiFrames` is a
   liveness signal over a window only a few frame periods wide, and is
   not a frame-rate measurement;
+- *why* the starvation factor differs so widely by operating system.
+  OS thread scheduling, JVM thread priority, and per-platform blocking
+  stdio behaviour are all candidates; this task separates none of them;
+- that the starvation factors are precise. The under-load period is
+  `window ÷ uiFrames`, so the macOS figure rests on three frames and
+  the Ubuntu figure on fifty. Treat the macOS number as an order of
+  magnitude, not a measurement;
+- that a paced or batched command stream starves the render thread at
+  all. 1,000 back-to-back blocking pings is a deliberately pathological
+  control-thread pattern, not a model of real UI traffic;
 - optimized-build latency, since both processes are Debug builds;
 - latency under concurrent audio-callback load, real plugin traffic, or
   payloads larger than a ping — only ping round-trip is exercised;
