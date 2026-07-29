@@ -1,7 +1,8 @@
 # Skia GPU Context-Recreation Proxy — 2026-07-29
 
 Status: P0-005 Week 4 slice 3 (R-03). Deterministic Skiko context
-teardown/recreation is verified on the Windows Direct3D reference machine.
+teardown/recreation is verified on the Windows Direct3D reference machine
+and completes on hosted Direct3D, Metal, and Ubuntu/Xvfb software.
 Literal operating-system sleep/wake is explicitly accepted as a Phase 0
 evidence gap; this proxy is not labeled as proof of it.
 
@@ -37,8 +38,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\gradle.ps1 :ui:desktop:gpuCon
 ```
 
 The task is wired into `gradle check` after the resize/monitor recovery
-task. Hosted CI results are pending at the time of this initial local
-record and will be added only after those jobs run.
+task. It ran on the existing Windows/macOS/Linux CI matrix in Actions run
+`30439417854`.
 
 ## Local result
 
@@ -65,6 +66,29 @@ stuck Gradle process. The complete Java verification graph finished
 `BUILD SUCCESSFUL` with seven actionable tasks executed; the engine probe
 was not supplied locally, so the unrelated IPC load task reported its
 existing skip.
+
+## Hosted three-OS result
+
+All five jobs in Actions run `30439417854` completed successfully:
+Windows, macOS, Ubuntu/Xvfb, ASan+UBSan, and TSan. The three UI jobs
+reported:
+
+| Hosted environment | Backend | New contexts | Callbacks | Completed presents |
+|---|---|---:|---:|---:|
+| Windows 2022 | Direct3D | 5 | 31 | 30 |
+| macOS arm64 | Metal | 5 | 32 | 21 |
+| Ubuntu x64 under Xvfb | `SOFTWARE_FAST` | 5 | 15 | 15 |
+
+Every environment retained its selected backend through the initial
+context plus all five replacements. Every replacement initialized and
+completed the required three presents; the Ubuntu count is exactly the
+15 required presents, while asynchronous scheduling produced additional
+frames on Direct3D and Metal. These counts are completion evidence, not
+performance figures.
+
+Every hosted output also retained the two evidence labels:
+`sleepWake=CONTEXT_RECREATE_PROXY` and
+`literalSleepWake=ACCEPTED_EVIDENCE_GAP`.
 
 ## Accepted literal sleep/wake gap
 
@@ -99,9 +123,9 @@ It does not prove:
   gap, not a completed test;
 - **device-loss recovery.** No adapter removal, driver reset, TDR, or
   backend error was injected. That remains a separate Week 4 slice;
-- **recovery on macOS Metal, Linux OpenGL, or Ubuntu's CI software
-  fallback.** Those claims require the pending hosted CI run; a real
-  Linux GPU remains unavailable even after CI;
+- **recovery on a real Linux GPU.** Ubuntu completed through Skiko's
+  `SOFTWARE_FAST` fallback under Xvfb. No `LinuxOpenGLRedrawer` path ran
+  on actual GPU hardware;
 - **adapter fallback.** Every local recreation selected Direct3D. The
   test records backend sequence but did not force Direct3D to fail and
   observe selection of another API;
