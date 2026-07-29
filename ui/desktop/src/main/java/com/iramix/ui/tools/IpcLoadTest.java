@@ -2,12 +2,18 @@ package com.iramix.ui.tools;
 
 import com.iramix.ui.ipc.EngineSession;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.Locale;
 
 public final class IpcLoadTest {
     private static final int WARMUP_COMMANDS = 100;
     private static final int MEASURED_COMMANDS = 1_000;
+    // The render loop is alive by construction, but nothing schedules it
+    // against the ping loop. Wait for it to advance one more frame so the
+    // measurement window opens on a loop proven to be producing frames.
+    private static final Duration RENDER_READY_TIMEOUT =
+        Duration.ofSeconds(10);
 
     private IpcLoadTest() {}
 
@@ -28,6 +34,21 @@ public final class IpcLoadTest {
                 session.ping();
             }
 
+            var framesBeforeWait = uiLoad.renderedFrames();
+            if (
+                !uiLoad.awaitFrameAfter(
+                    framesBeforeWait,
+                    RENDER_READY_TIMEOUT
+                )
+            ) {
+                throw new AssertionError(
+                    "Dummy Skia UI render loop produced no frame in "
+                        + RENDER_READY_TIMEOUT.toMillis()
+                        + "ms before the measurement window opened; "
+                        + "the render loop never reached steady state."
+                );
+            }
+
             var framesBeforeMeasurement = uiLoad.renderedFrames();
             var latencies = new long[MEASURED_COMMANDS];
             for (var index = 0; index < latencies.length; ++index) {
@@ -37,7 +58,10 @@ public final class IpcLoadTest {
                 uiLoad.renderedFrames() - framesBeforeMeasurement;
             if (measuredUiFrames == 0) {
                 throw new AssertionError(
-                    "Dummy Skia UI load did not render during measurement."
+                    "Dummy Skia UI render loop was producing frames "
+                        + "before the measurement window but rendered "
+                        + "none during it; the UI stalled under IPC "
+                        + "load."
                 );
             }
 
