@@ -1,7 +1,9 @@
 # Phase 0 Execution Plan
 
 Target duration: 8 weeks  
-Status: In progress  
+Status: In progress — technical validation complete, product validation
+not started. See [`EXIT_REVIEW.md`](EXIT_REVIEW.md) (2026-07-29) for what
+remains and why none of it is an engineering blocker.  
 Started: 2026-07-27
 
 ## Outcomes
@@ -238,11 +240,22 @@ stand-in, not a real CLAP or VST3.
 
 ## Week 8: Review and Phase 1 commitment
 
-- Run all benchmarks on reference hardware.
-- Close or explicitly accept every critical risk.
-- Review research findings with target users.
-- Convert validated spikes into a Phase 1 backlog.
-- Decide whether architecture ADR-0003 is accepted.
+Delivered as [`EXIT_REVIEW.md`](EXIT_REVIEW.md) and
+[`PHASE_1_BACKLOG.md`](PHASE_1_BACKLOG.md) on 2026-07-29.
+
+- Run all benchmarks on reference hardware — done for the Windows
+  reference machine; macOS and Linux are accepted as out of scope
+  (R-13).
+- Close or explicitly accept every critical risk — **not achieved.**
+  Five of the seven risks at priority 16+ satisfy the escalation rule;
+  R-01 (capacity, priority 25) and R-10 (widget set and velocity) have
+  neither evidence nor an accepted fallback.
+- Review research findings with target users — **not started** (P0-009).
+- Convert validated spikes into a Phase 1 backlog — done, with
+  structural sizing and no owners.
+- Decide whether architecture ADR-0003 is accepted — assessed against
+  its own five criteria; acceptance for Windows Tier-1 recommended and
+  awaiting sign-off.
 
 ## Current task board
 
@@ -261,7 +274,7 @@ stand-in, not a real CLAP or VST3.
 | P0-011 | Immutable real-time graph core | Windows production path, 5,001-publication sanitizer edit-storm, cross-block ramps, sample-rate modulation, and denormal protection verified; other backends and final soak pending |
 | P0-012 | Disk and session resilience | Native session ownership, write-ahead journal, monotonic undo/redo, replay, immutable/coalesced saves, fixed-window autosave, shutdown flush, revision-gated history compaction, revisioned backup rotation/retention, fail-closed automatic restore, and durable journal baselines verified locally and on three-OS CI/Java/sanitizers; and schema v4 media references, MIDI, device configuration, and plugin state verified locally and on three-OS CI/Java/sanitizers; media relink/restoration verified locally and on three-OS CI/sanitizers; device-configuration restoration decided and verified locally and on three-OS CI/sanitizers, with real WASAPI enumeration selecting a session's stored endpoint on Windows hardware and the audio callback measured on it at zero target/deadline misses (macOS/Linux enumeration absent); plugin state restoration moved to P0-013; macOS/Linux reference-hardware benchmarks accepted as out of scope for Phase 0 (R-13) |
 | P0-013 | Plugin process isolation | Bridge slice done: shared-memory transport, bounded deadline degrading to silence, host survives child crash and hang, bridge overhead p99 19.1 us, orphan watchdog verified. State slice done: a session's stored blob restores into the live plugin and is observable in rendered audio, capture round trips byte for byte through persistence, six refusal paths verified, and a capture from a crashed plugin times out at its deadline instead of stalling a save. No plugin SDK involved. Control transport slice done: bounded lock-free SPSC parameter ring, events applied at their scheduled block and never early, saturation/lateness/reordering counted rather than dropped, and a transport change observable in both rendered audio and captured state. No plugin SDK involved. Editor embedding delivered as a risk report only — a live Windows probe was attempted and abandoned without isolating the cause, and macOS/Linux cannot be checked at all (R-13, R-04). Out-of-process scan done against 201 real installed plugins: 191 scanned, 188 named through VST3 SDK 3.8.0, 7 load failures and 3 load hangs recorded rather than fatal, zero host failures, and a Windows error-mode trap fixed that had made a bad module indistinguishable from a hang. CLAP modules load but are not decoded (no headers). Real VST3 hosting done in-process: five third-party plugins instantiated, 532/532 blocks processed each, state saved and restored through the plugin's own format, with a plugin found writing to stdout (which the stdio Java/C++ transport could not have survived) and one whose state is not byte-stable across a round trip. Real VST3 hosting moved into the bridge child — done: `PluginBridge::runChild()` now hosts a real `Vst3Host` on its `"vst3"` mode, driven only through `processBlock`/`restoreState`/`captureState`, closing the in-process gap the previous slice carried; three third-party plugins verified through the bridge, 532/532 blocks each, state round trips byte-stable, audio still flows after restore (see [`results/VST3_HOSTING_IN_BRIDGE_CHILD_2026-07-29.md`](results/VST3_HOSTING_IN_BRIDGE_CHILD_2026-07-29.md)). Plugin state capture wired into autosave — done: `captureLivePluginState()` refreshes a document's plugin state from a live bridge and hands it to a real `AutosaveClock`-scheduled `SessionPersistenceService` window, read back through `JournaledSession::open()` to confirm the durably saved file holds the live-captured state rather than a stale placeholder (see [`results/PLUGIN_STATE_AUTOSAVE_WIRING_2026-07-29.md`](results/PLUGIN_STATE_AUTOSAVE_WIRING_2026-07-29.md)); exercised against the stand-in plugin only, not yet joined to real VST3 hosting, and `SessionController`/`JournaledSession` still have no plugin-editing API for a real caller to invoke it from. Crash/hang recovery against a real plugin — done: `runChild()`'s `"vst3-crash"`/`"vst3-hang"` modes inject the same fault the stand-in uses, but only after three genuine blocks through the real plugin's own DSP; two third-party plugins verified for both faults, every degraded block silent, host process alive and responsive afterward in all four runs (see [`results/VST3_CRASH_HANG_RECOVERY_2026-07-29.md`](results/VST3_CRASH_HANG_RECOVERY_2026-07-29.md)). Real parameters via IEditController — done: `Vst3Host` acquires a real `IEditController` (same-object or separate-class), enumerates the plugin's own parameter list, and delivers changes through a minimal `IParameterChanges`/`IParamValueQueue` pair on `process()`, exactly where a real host delivers automation. The bridge's existing generic parameter transport now routes non-bypass IDs to it in `"vst3"` mode; three third-party plugins verified (6–11 real parameters each, plugin-assigned IDs), each change accepted and observably reaching the plugin's own `getState()` output (see [`results/VST3_IEDITCONTROLLER_PARAMETERS_2026-07-29.md`](results/VST3_IEDITCONTROLLER_PARAMETERS_2026-07-29.md)). MIDI to a real instrument — done: `Vst3Host` delivers notes through a minimal `IEventList`, the same pattern as parameter automation; the bridge gained a second, independent bounded lock-free SPSC ring so a note burst and an automation burst saturate independently. Verified against a real instrument (Vital, `in_channels=0`): measured silence before a note, substantial measured output after, nothing else changed (see [`results/VST3_MIDI_TO_INSTRUMENTS_2026-07-29.md`](results/VST3_MIDI_TO_INSTRUMENTS_2026-07-29.md)). This closes every item P0-013 listed as still pending; what remains unexercised is cataloged per-slice in each result document's evidence boundary, chiefly macOS/Linux hardware (R-13, accepted) and a session-editing caller for the plugin transports, which was never P0-013's scope |
-| P0-014 | Phase 0 exit review and Phase 1 backlog | Not started |
+| P0-014 | Phase 0 exit review and Phase 1 backlog | Review and backlog delivered ([`EXIT_REVIEW.md`](EXIT_REVIEW.md), [`PHASE_1_BACKLOG.md`](PHASE_1_BACKLOG.md)). Verdict: technical validation is done and the architecture is safe to commit to, but **Phase 0 as specified is not complete** — three of ten required outputs (validated brief/scope, interaction prototypes, three-OS callback evidence) are unmet, and two of the seven risks at priority 16+ fail the register's own escalation rule. Those two are R-01 (team capacity, priority 25) and R-10 (widget-set limit and delivery velocity, priority 16); both are capacity questions rather than technical ones, and neither is blocked by hardware or by anything engineering can measure. ADR-0003 assessed against its five validation criteria: four met, PDC-after-routing partial (graph-level fixture, not the full plugin case); recommendation is to accept for Windows Tier-1 with that qualification plus unmeasured macOS/Linux backends, pending sign-off. Backlog carries structural sizing but **no owners**, because the project has no recorded team — which is R-01 itself |
 
 ## Definition of done
 

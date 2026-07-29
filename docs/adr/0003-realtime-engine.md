@@ -52,5 +52,28 @@ ASan/UBSan and TSan, are recorded in
 Cross-block ramps, sample-rate modulation, and callback denormal protection
 are recorded in
 [`../phase-0/results/PARAMETER_RAMP_DENORMAL_2026-07-28.md`](../phase-0/results/PARAMETER_RAMP_DENORMAL_2026-07-28.md).
-This evidence does not replace the two-hour callback soak or target-hardware
-backend evidence, so this ADR remains proposed.
+## Exit-review status — 2026-07-29
+
+The two-hour callback soak named above has since been run, on two
+independent Windows backends:
+[`../phase-0/results/AUDIO_CALLBACK_SOAK_WINDOWS_2026-07-29.md`](../phase-0/results/AUDIO_CALLBACK_SOAK_WINDOWS_2026-07-29.md)
+(ASIO4ALL, 128 and 256 frames) and
+[`../phase-0/results/WASAPI_CALLBACK_SOAK_WINDOWS_2026-07-29.md`](../phase-0/results/WASAPI_CALLBACK_SOAK_WINDOWS_2026-07-29.md)
+(WASAPI exclusive, 256 frames). 1,799,407 measured callbacks, zero target
+misses, zero hard deadline misses, zero allocations, zero blocking locks.
+
+Against the five validation criteria above: four are met, and *latency
+compensation after routing changes* is **partial** — PDC is verified on a
+graph-level fixture rather than the full plugin case, as
+`REALTIME_GRAPH_WINDOWS_2026-07-27.md` says of itself.
+
+The other condition in the original sentence, target-hardware backend
+evidence for macOS and Linux, is not met and will not be met in Phase 0:
+the project has no such hardware (R-13, accepted).
+
+[`../phase-0/EXIT_REVIEW.md`](../phase-0/EXIT_REVIEW.md) therefore
+recommends accepting this ADR for **Windows Tier-1**, carrying two
+qualifications: PDC after routing changes is fixture-level only, and
+macOS/Linux backends are unmeasured. Accepting an ADR is a project
+decision rather than a measurement, so the status above stays *Proposed*
+until that sign-off is recorded here.
