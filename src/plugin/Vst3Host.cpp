@@ -1,6 +1,7 @@
 #include "iramix/plugin/Vst3Host.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 
 #if defined(_WIN32)
@@ -19,6 +20,7 @@
 #include "pluginterfaces/vst/ivstcomponent.h"
 #include "pluginterfaces/vst/ivsteditcontroller.h"
 #include "pluginterfaces/vst/ivsthostapplication.h"
+#include "pluginterfaces/vst/ivstparameterchanges.h"
 #endif
 
 namespace iramix::plugin {
@@ -201,6 +203,136 @@ public:
     }
 };
 
+// One parameter's value points within a single block. This host only
+// ever delivers the newest queued value for a parameter at sample offset
+// zero — never a ramp within the block — so a one-element queue is
+// exact, not a simplification of something richer.
+class ParameterChangeQueue final : public Vst::IParamValueQueue {
+public:
+    void reset(const Vst::ParamID parameterId, const Vst::ParamValue value) {
+        parameterId_ = parameterId;
+        value_ = value;
+    }
+
+    tresult PLUGIN_API queryInterface(const TUID interfaceId, void** object)
+        override {
+        if (object == nullptr) {
+            return kInvalidArgument;
+        }
+        if (sameInterface(interfaceId, Vst::IParamValueQueue_iid)
+            || sameInterface(interfaceId, FUnknown_iid)) {
+            *object = static_cast<Vst::IParamValueQueue*>(this);
+            addRef();
+            return kResultOk;
+        }
+        *object = nullptr;
+        return kNoInterface;
+    }
+
+    uint32 PLUGIN_API addRef() override {
+        return 1U;
+    }
+
+    uint32 PLUGIN_API release() override {
+        return 1U;
+    }
+
+    Vst::ParamID PLUGIN_API getParameterId() override {
+        return parameterId_;
+    }
+
+    int32 PLUGIN_API getPointCount() override {
+        return 1;
+    }
+
+    tresult PLUGIN_API getPoint(
+        const int32 index,
+        int32& sampleOffset,
+        Vst::ParamValue& value
+    ) override {
+        if (index != 0) {
+            return kInvalidArgument;
+        }
+        sampleOffset = 0;
+        value = value_;
+        return kResultOk;
+    }
+
+    tresult PLUGIN_API addPoint(int32, Vst::ParamValue, int32&) override {
+        // Never called: this host only ever presents a queue it built
+        // itself, and never hands it to the plugin to write into.
+        return kNotImplemented;
+    }
+
+private:
+    Vst::ParamID parameterId_ {0U};
+    Vst::ParamValue value_ {0.0};
+};
+
+// Presents this block's pending parameter changes to
+// IAudioProcessor::process(). Backed by fixed storage the caller owns —
+// no allocation, matching the real-time-adjacent contract process()
+// already promises.
+class ParameterChanges final : public Vst::IParameterChanges {
+public:
+    explicit ParameterChanges(
+        std::span<ParameterChangeQueue> storage
+    ) : storage_ {storage} {}
+
+    void setActiveCount(const std::size_t count) {
+        count_ = std::min(count, storage_.size());
+    }
+
+    tresult PLUGIN_API queryInterface(const TUID interfaceId, void** object)
+        override {
+        if (object == nullptr) {
+            return kInvalidArgument;
+        }
+        if (sameInterface(interfaceId, Vst::IParameterChanges_iid)
+            || sameInterface(interfaceId, FUnknown_iid)) {
+            *object = static_cast<Vst::IParameterChanges*>(this);
+            addRef();
+            return kResultOk;
+        }
+        *object = nullptr;
+        return kNoInterface;
+    }
+
+    uint32 PLUGIN_API addRef() override {
+        return 1U;
+    }
+
+    uint32 PLUGIN_API release() override {
+        return 1U;
+    }
+
+    int32 PLUGIN_API getParameterCount() override {
+        return static_cast<int32>(count_);
+    }
+
+    Vst::IParamValueQueue* PLUGIN_API getParameterData(const int32 index)
+        override {
+        if (index < 0 || static_cast<std::size_t>(index) >= count_) {
+            return nullptr;
+        }
+        return &storage_[static_cast<std::size_t>(index)];
+    }
+
+    Vst::IParamValueQueue* PLUGIN_API addParameterData(
+        const Vst::ParamID&,
+        int32&
+    ) override {
+        // Never called for the same reason ParameterChangeQueue::addPoint
+        // is not: this host presents its own pre-built queue rather than
+        // accepting the plugin's.
+        return nullptr;
+    }
+
+private:
+    std::span<ParameterChangeQueue> storage_;
+    std::size_t count_ {0U};
+};
+
 } // namespace
 #endif
 
@@ -218,6 +350,12 @@ struct Vst3Host::Impl final {
     HostApplication hostApplication {};
     Steinberg::Vst::IComponent* component {nullptr};
     Steinberg::Vst::IAudioProcessor* processor {nullptr};
+    // Null when the plugin exposes no IEditController at all. Equal to
+    // component when the plugin implements both interfaces on the same
+    // object, in which case it must not be terminated/released a second
+    // time.
+    Steinberg::Vst::IEditController* controller {nullptr};
+    bool controllerIsComponent {false};
     bool processing {false};
     bool active {false};
 
@@ -232,6 +370,17 @@ struct Vst3Host::Impl final {
     std::vector<std::vector<float>> outputStorage;
     std::vector<float*> inputPointers;
     std::vector<float*> outputPointers;
+
+    // Changes queued by setParameterNormalized() since the last
+    // process() call. Bounded rather than grown: a block only ever needs
+    // to carry however many distinct parameters actually changed since
+    // the previous one, and an automation storm beyond that bound simply
+    // keeps the newest value per parameter already queued rather than
+    // allocating a bigger one.
+    static constexpr std::size_t kMaxPendingParameters = 32U;
+    std::array<ParameterChangeQueue, kMaxPendingParameters>
+        pendingParameterQueues {};
+    std::size_t pendingParameterCount {0U};
 #endif
 };
 
@@ -282,6 +431,14 @@ bool Vst3Host::saveState(std::vector<std::byte>&) {
 }
 
 bool Vst3Host::loadState(std::span<const std::byte>) {
+    return false;
+}
+
+bool Vst3Host::parameterInfo(std::uint32_t, Vst3ParameterInfo&) const {
+    return false;
+}
+
+bool Vst3Host::setParameterNormalized(std::uint32_t, float) noexcept {
     return false;
 }
 
@@ -391,14 +548,44 @@ bool Vst3Host::open(
         close();
         return false;
     }
-    factory->release();
 
     if (impl_->component->initialize(&impl_->hostApplication)
         != Steinberg::kResultOk) {
         error = "the plugin failed to initialise";
+        factory->release();
         close();
         return false;
     }
+
+    // Parameters are optional, and their absence is not a reason to
+    // refuse the plugin: many effects process audio with no automatable
+    // surface at all. Most plugins implement IEditController on the same
+    // object as IComponent; the SDK also allows a separate controller
+    // class, which needs the factory kept alive one call longer.
+    if (impl_->component->queryInterface(
+            Steinberg::Vst::IEditController_iid,
+            reinterpret_cast<void**>(&impl_->controller)
+        ) == Steinberg::kResultOk
+        && impl_->controller != nullptr) {
+        impl_->controllerIsComponent = true;
+    } else {
+        Steinberg::TUID controllerId {};
+        if (impl_->component->getControllerClassId(controllerId)
+                == Steinberg::kResultOk
+            && factory->createInstance(
+                controllerId,
+                Steinberg::Vst::IEditController_iid,
+                reinterpret_cast<void**>(&impl_->controller)
+            ) == Steinberg::kResultOk
+            && impl_->controller != nullptr) {
+            if (impl_->controller->initialize(&impl_->hostApplication)
+                != Steinberg::kResultOk) {
+                impl_->controller->release();
+                impl_->controller = nullptr;
+            }
+        }
+    }
+    factory->release();
 
     if (impl_->component->queryInterface(
             Steinberg::Vst::IAudioProcessor_iid,
@@ -443,6 +630,9 @@ bool Vst3Host::open(
     impl_->outputChannels = busChannels(Steinberg::Vst::kOutput);
     impl_->info.inputChannels = impl_->inputChannels;
     impl_->info.outputChannels = impl_->outputChannels;
+    impl_->info.parameterCount = impl_->controller != nullptr
+        ? static_cast<std::uint32_t>(impl_->controller->getParameterCount())
+        : 0U;
     if (impl_->outputChannels == 0U) {
         error = "the plugin has no audio output bus";
         close();
@@ -519,6 +709,15 @@ void Vst3Host::close() noexcept {
         impl_->processor->release();
         impl_->processor = nullptr;
     }
+    // A separate controller instance is this host's own object and must
+    // be torn down; a controller that is the same object as the
+    // component is released once, below, by the component's own release.
+    if (impl_->controller != nullptr && !impl_->controllerIsComponent) {
+        static_cast<void>(impl_->controller->terminate());
+        impl_->controller->release();
+    }
+    impl_->controller = nullptr;
+    impl_->controllerIsComponent = false;
     if (impl_->component != nullptr) {
         if (impl_->active) {
             static_cast<void>(impl_->component->setActive(false));
@@ -528,6 +727,7 @@ void Vst3Host::close() noexcept {
         impl_->component->release();
         impl_->component = nullptr;
     }
+    impl_->pendingParameterCount = 0U;
     // The module itself is deliberately left loaded. A plugin that
     // misbehaves in its unload path would turn a clean shutdown into a
     // crash, and this process is short-lived by design.
@@ -576,6 +776,15 @@ bool Vst3Host::process(
     outputBus.silenceFlags = 0U;
     outputBus.channelBuffers32 = impl_->outputPointers.data();
 
+    // Built fresh each call over storage owned by impl_: no allocation,
+    // and it presents exactly the parameters that changed since the
+    // previous process() call — automation delivered the way a real host
+    // delivers it, not by writing into the plugin's state directly.
+    ParameterChanges inputParameterChanges {
+        std::span<ParameterChangeQueue> {impl_->pendingParameterQueues}
+    };
+    inputParameterChanges.setActiveCount(impl_->pendingParameterCount);
+
     Steinberg::Vst::ProcessData data {};
     data.processMode = Steinberg::Vst::kRealtime;
     data.symbolicSampleSize = Steinberg::Vst::kSample32;
@@ -584,10 +793,14 @@ bool Vst3Host::process(
     data.numOutputs = 1;
     data.inputs = impl_->inputChannels > 0U ? &inputBus : nullptr;
     data.outputs = &outputBus;
+    data.inputParameterChanges = impl_->pendingParameterCount > 0U
+        ? &inputParameterChanges
+        : nullptr;
 
     if (impl_->processor->process(data) != Steinberg::kResultOk) {
         return false;
     }
+    impl_->pendingParameterCount = 0U;
 
     for (std::uint32_t channel = 0U; channel < bridgeChannels; ++channel) {
         const auto source = channel < impl_->outputChannels
@@ -627,6 +840,88 @@ bool Vst3Host::loadState(const std::span<const std::byte> state) {
         stream.seek(0, Steinberg::IBStream::kIBSeekSet, &ignored)
     );
     return impl_->component->setState(&stream) == Steinberg::kResultOk;
+}
+
+bool Vst3Host::parameterInfo(
+    const std::uint32_t index,
+    Vst3ParameterInfo& info
+) const {
+    if (!impl_->opened || impl_->controller == nullptr) {
+        return false;
+    }
+    if (index
+        >= static_cast<std::uint32_t>(impl_->controller->getParameterCount())) {
+        return false;
+    }
+    Steinberg::Vst::ParameterInfo raw {};
+    if (impl_->controller->getParameterInfo(
+            static_cast<Steinberg::int32>(index),
+            raw
+        ) != Steinberg::kResultOk) {
+        return false;
+    }
+    info.id = static_cast<std::uint32_t>(raw.id);
+    info.defaultNormalizedValue =
+        static_cast<float>(raw.defaultNormalizedValue);
+    // Best-effort ASCII: VST3 titles are UTF-16, and this host has no
+    // general Unicode transcoder. A non-ASCII title degrades to '?'
+    // rather than being silently truncated at the first such character.
+    info.title.clear();
+    for (std::size_t index2 = 0U;
+        index2 < 128U && raw.title[index2] != 0;
+        ++index2) {
+        const auto character = raw.title[index2];
+        info.title.push_back(
+            character < 128 ? static_cast<char>(character) : '?'
+        );
+    }
+    return true;
+}
+
+bool Vst3Host::setParameterNormalized(
+    const std::uint32_t parameterId,
+    const float value
+) noexcept {
+    if (!impl_->opened || impl_->controller == nullptr) {
+        return false;
+    }
+    const auto id = static_cast<Steinberg::Vst::ParamID>(parameterId);
+    const auto clamped = std::clamp(value, 0.0F, 1.0F);
+
+    // The controller's own value follows immediately, exactly as a real
+    // host keeps its UI in sync without waiting for the next block.
+    if (impl_->controller->setParamNormalized(id, clamped)
+        != Steinberg::kResultOk) {
+        return false;
+    }
+
+    for (std::size_t index = 0U;
+        index < impl_->pendingParameterCount;
+        ++index) {
+        if (impl_->pendingParameterQueues[index].getParameterId() == id) {
+            impl_->pendingParameterQueues[index].reset(id, clamped);
+            return true;
+        }
+    }
+    if (impl_->pendingParameterCount
+        >= Impl::kMaxPendingParameters) {
+        // Bounded: keep the newest values rather than grow. The
+        // controller already has the authoritative value from the call
+        // above; only this block's delivery of the dropped-oldest
+        // parameter is lost, and it will be delivered on its own next
+        // change.
+        for (std::size_t index = 1U;
+            index < impl_->pendingParameterCount;
+            ++index) {
+            impl_->pendingParameterQueues[index - 1U] =
+                impl_->pendingParameterQueues[index];
+        }
+        --impl_->pendingParameterCount;
+    }
+    impl_->pendingParameterQueues[impl_->pendingParameterCount]
+        .reset(id, clamped);
+    ++impl_->pendingParameterCount;
+    return true;
 }
 
 #endif

@@ -18,6 +18,15 @@ struct Vst3HostInfo final {
     bool acceptsFloat32 {false};
 };
 
+struct Vst3ParameterInfo final {
+    // The plugin's own ID, stable across a session — not an index. Never
+    // renumbered by this host.
+    std::uint32_t id {0U};
+    std::string title;
+    // [0, 1], as IEditController defines it.
+    float defaultNormalizedValue {0.0F};
+};
+
 // Hosts one real VST3 plugin instance.
 //
 // Intended to run inside the plugin child process, never in the host: the
@@ -63,6 +72,25 @@ public:
 
     [[nodiscard]] bool opened() const noexcept;
     [[nodiscard]] const Vst3HostInfo& info() const noexcept;
+
+    // The plugin's own parameters, via IEditController — never the
+    // stand-in's synthetic gain/bypass concept. index is a position, not
+    // an identity: use the returned id for setParameterNormalized().
+    // False past the end, or if the plugin exposes no IEditController.
+    [[nodiscard]] bool parameterInfo(
+        std::uint32_t index,
+        Vst3ParameterInfo& info
+    ) const;
+
+    // Queues a normalized [0, 1] value change for delivery on the next
+    // process() call, exactly where a real host delivers automation:
+    // through ProcessData's parameter changes, not by writing directly
+    // into the plugin's state. False if the plugin has no
+    // IEditController, or the id is not one of its parameters.
+    [[nodiscard]] bool setParameterNormalized(
+        std::uint32_t parameterId,
+        float value
+    ) noexcept;
 
     // False when the project was built without IRAMIX_VST3_SDK_PATH, in
     // which case open() always fails and says so.
