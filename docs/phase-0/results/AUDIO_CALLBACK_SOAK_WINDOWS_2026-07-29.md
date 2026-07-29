@@ -88,10 +88,17 @@ result, three orders of magnitude smaller: 0.06% here against 16.55%
 there.
 
 These are **not engine-caused dropouts**. The engine met every deadline it
-was given; what varies is when the wrapper driver delivered the callback.
-The distinction matters because the Phase 0 gate is specifically about
+was given; what varies is when the driver delivered the callback. The
+distinction matters because the Phase 0 gate is specifically about
 engine-caused dropouts, and conflating the two would either falsely
 implicate the engine or falsely clear the driver.
+
+**Update, same day:** this section originally read the deficit as the
+wrapper driver's own cadence. A WASAPI soak at the same 256-frame size
+([`WASAPI_CALLBACK_SOAK_WINDOWS_2026-07-29.md`](WASAPI_CALLBACK_SOAK_WINDOWS_2026-07-29.md))
+also lost callbacks — 12 against ASIO4ALL's 44 — so the deficit survives
+without `ASIO4ALL v2` in the path and cannot be attributed to it alone.
+WASAPI lost fewer, but one run each cannot turn that into a magnitude.
 
 ## Real-time audit proof
 
@@ -143,9 +150,10 @@ This result does **not** prove:
 
 - that the soak passed at 64 frames. It was not run; no available device
   delivers the period (R-15).
-- anything about WASAPI. This soak is ASIO4ALL only. The WASAPI backend
-  has only ever been screened for 200 seconds, and it can open just the
-  256-frame configuration on this endpoint.
+- anything about WASAPI. This soak is ASIO4ALL only. *(Superseded the
+  same day: WASAPI has since been soaked at 256 frames — see
+  [`WASAPI_CALLBACK_SOAK_WINDOWS_2026-07-29.md`](WASAPI_CALLBACK_SOAK_WINDOWS_2026-07-29.md).
+  It still opens only the 256-frame configuration on this endpoint.)*
 - anything about macOS or Linux. Neither Core Audio nor JACK has been run
   on target hardware at any duration (R-13, accepted).
 - that there are no audible dropouts. There is no acoustic loopback and no
@@ -170,8 +178,10 @@ This result does **not** prove:
 ## Remaining P0-008 evidence
 
 - Core Audio and JACK soaks on target hardware (blocked by R-13);
-- a WASAPI soak at 256 frames, to check whether the delivery deficit is
-  specific to the wrapper driver or common to the endpoint;
+- ~~a WASAPI soak at 256 frames, to check whether the delivery deficit is
+  specific to the wrapper driver or common to the endpoint~~ — done, and
+  it found the deficit on both backends
+  ([`WASAPI_CALLBACK_SOAK_WINDOWS_2026-07-29.md`](WASAPI_CALLBACK_SOAK_WINDOWS_2026-07-29.md));
 - graph hot-swap and automation exercised at soak length rather than
   screening length;
 - driver-level xrun evidence or acoustic loopback verification;
