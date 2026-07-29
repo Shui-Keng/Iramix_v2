@@ -15,9 +15,12 @@ recorded team, so any day or week figure here would be invented.
 - **L** — crosses a process, schema, or protocol boundary, or needs new
   evidence on hardware the project does not have.
 
-**Owners are deliberately unassigned.** R-01 (priority 25) is precisely
-that the team capacity is unknown; filling in names here would be the
-same fiction the risk warns about.
+**Owners are unassigned because there is only one.** As of 2026-07-29 the
+team is one developer working with an AI assistant, so every item below
+has the same owner and naming them would add nothing. That is not a
+scheduling detail — it is R-01, priority 25, still open. Read the sizes
+as relative effort within a single-person queue, never as work that can
+run in parallel.
 
 ## P1-A — Blockers on committing to Phase 1 at all
 
@@ -28,7 +31,7 @@ complete, and they gate scope decisions rather than code.
 |---|---|---|---|
 | ~~P1-A1~~ | ~~Interview three composers and three sound designers; rank the top ten workflow problems~~ — **withdrawn 2026-07-29**: no target users are reachable, accepted as R-16 | — | P0-009, required output 1 |
 | P1-A2 | Build low-fidelity interaction prototypes for arrangement, mixer, launcher, and device panel | M | Required output 2 |
-| P1-A3 | Record actual team size and available capacity; re-score or close R-01 | S | R-01, priority 25, fails the escalation rule |
+| P1-A3 | ~~Record actual team size~~ — **done 2026-07-29: one developer plus an AI assistant.** What remains is the decision it forces: cut `V1_SCOPE.md`'s 34 must-ship items to what one developer can deliver, or explicitly accept the overrun | S | R-01, priority 25, still fails the escalation rule |
 | P1-A4 | Declare a v1 widget-set limit and start measuring delivery velocity against it | S | R-10, priority 16, fails the escalation rule |
 
 P1-A2 survives A1's withdrawal on its own merits. It was originally

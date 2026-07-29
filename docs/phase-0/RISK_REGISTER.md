@@ -4,7 +4,7 @@ Scoring: probability and impact range from 1 to 5. Priority is their product.
 
 | ID | Risk | P | I | Priority | Phase 0 response |
 |---|---|---:|---:|---:|---|
-| R-01 | Scope exceeds available team capacity | 5 | 5 | 25 | Enforce the v1 scope contract and validate team size |
+| R-01 | Scope exceeds available team capacity | 5 | 5 | 25 | **Team size recorded 2026-07-29: one developer, working with an AI assistant. No other contributors.** That half of the response is now done; the other half is not. `V1_SCOPE.md` lists 34 must-ship items — a cross-platform DAW with recording, non-destructive editing, sample-accurate automation, plugin hosting, and project migration — and it was written without a team size in view. Recording the number does not discharge the escalation rule: what closes this risk is a decision, either a scope cut to what one developer can deliver or an explicit acceptance of the overrun. Neither has been made. See "Team capacity" |
 | R-02 | Plugin crash or hang destabilizes audio | 4 | 5 | 20 | Bounded-deadline shared-memory bridge measured: host survives child crash and hang, degrading to counted silence. See `results/PLUGIN_PROCESS_ISOLATION_2026-07-28.md`. Isolation and real VST3 hosting are now joined: the bridge child can host a real plugin (`results/VST3_HOSTING_IN_BRIDGE_CHILD_2026-07-29.md`), three third-party plugins verified, 532/532 blocks each. That work added a third reason for isolation beyond crash and hang: a Pure Data based plugin writes its banner to **stdout**, which is the transport P0-007 uses for the Java/C++ boundary, so an in-process plugin would corrupt the protocol rather than crash it. Crash/hang recovery is now also proven against real plugins: `results/VST3_CRASH_HANG_RECOVERY_2026-07-29.md` injects the same fault after three genuine blocks of real DSP, against two third-party plugins, both fault kinds. `testPluginProcessTermination`/`testPluginProcessHang` still cover the stand-in only in `ctest`, since the real-plugin variant depends on a locally installed plugin no CI runner has |
 | R-03 | Skiko/Skia GPU behavior differs substantially by OS | 4 | 4 | 16 | Run one renderer and device-loss spike per OS. **Partially open.** Slice 1 (`results/SKIA_GPU_BACKEND_FRAMETIME_2026-07-29.md`) landed a backend matrix across all three CI OSes: Direct3D on Windows, Metal on macOS, and Skiko's software fallback under Xvfb on Ubuntu CI. The Windows reference-machine median sits at the 60 Hz budget line (16.6ms) and misses 120 Hz; p99 widens from 28ms isolated to 67ms under `gradle check`. Slice 2 (`results/SKIA_GPU_RESIZE_MONITOR_RECOVERY_2026-07-29.md`) covers resize locally and in hosted CI: a continuously rendering window completed nine sizes/eight transitions with no crash, exception, timeout, or hang on Direct3D, Metal, and Ubuntu/Xvfb software. **Monitor movement is not done:** every available environment exposes one `GraphicsDevice`, and the task reports `LIMITATION_SINGLE_MONITOR`. Slice 3 (`results/SKIA_GPU_CONTEXT_RECREATION_PROXY_2026-07-29.md`) disposes/reinitializes the same SkiaLayer backend five times locally and in hosted CI; every replacement context initializes and resumes completed presents on Direct3D, Metal, and Ubuntu/Xvfb software. It is explicitly a `CONTEXT_RECREATE_PROXY`. **Literal OS sleep/wake is accepted as a Phase 0 evidence gap**, because safely suspending and resuming the host cannot be automated by a normal CI/test process; see "Literal sleep/wake coverage gap." Slice 4 (`results/SKIA_GPU_DEVICE_LOSS_ERROR_PATH_PROXY_2026-07-29.md`) safely injects one managed `RenderException` into Skiko's real draw-scope recovery handler locally and in hosted CI: Direct3D, Metal, and Ubuntu/Xvfb Software Fast all leave the failed backend, initialize a fallback context, and resume completed presents. It is explicitly a `SKIKO_RENDER_EXCEPTION_FALLBACK_PROXY`; the selected fallback varies by environment. **Native surface-allocation failure and literal device loss/TDR are accepted Phase 0 evidence gaps**, because pinned Skiko exposes no safe allocation fault seam and forcing either event can destabilize the only development machine; see "GPU device-loss coverage gaps." A real Linux GPU backend and cross-monitor/mixed-DPI recovery remain unmeasured |
 | R-04 | Linux plugin editors fail under Wayland | 4 | 4 | 16 | **Cannot be closed in Phase 0: no Linux hardware (see R-13).** Native Wayland has no cross-client reparenting mechanism at all, so the generic-editor fallback is a requirement rather than a contingency. See `results/PLUGIN_EDITOR_EMBEDDING_RISK_2026-07-29.md` |
@@ -30,13 +30,56 @@ fallback before Phase 1 begins.
 
 | Risk | Priority | Rule satisfied? |
 |---|---:|---|
-| R-01 Scope exceeds available team capacity | 25 | **No** — no team size is recorded, so the risk cannot even be evaluated, and the v1 scope contract has not been enforced against one |
+| R-01 Scope exceeds available team capacity | 25 | **Still no**, but for a different reason since 2026-07-29. The team size is now recorded — one developer plus an AI assistant — so the risk is evaluable. What is missing is the decision it demands: a scope cut or an explicit acceptance. Knowing the number is not a fallback |
 | R-10 Custom UI consumes capacity needed by audio engine | 16 | **No** — no widget-set limit is declared and no delivery velocity was measured at week 4 or since |
 | R-02, R-03, R-04, R-13, R-15, R-16 | 20/16/16/20/20/20 | Yes — measured evidence or an explicitly recorded acceptance |
 
 Both failures are capacity questions rather than technical ones, and
 neither is blocked by absent hardware. See
 [`EXIT_REVIEW.md`](EXIT_REVIEW.md).
+
+## Team capacity
+
+**Recorded 2026-07-29. R-01 remains open.**
+
+The project has **one developer**, working with an AI assistant. There are
+no other contributors, and none is expected.
+
+This closes the "validate team size" half of R-01's response. It does not
+close R-01.
+
+### Why recording it is not a mitigation
+
+`V1_SCOPE.md` commits to 34 must-ship items: audio/instrument/group/return/
+master tracks, linear arrangement, tempo and meter maps, audio and MIDI
+recording, non-destructive clip editing, routing and sends, sample-accurate
+automation, undo/redo/autosave/recovery/migration, plugin hosting, and
+cross-platform delivery on three operating systems. That list was written
+before the team size was known, and nothing in it has been re-cut since.
+
+R-01 scores 5 × 5. Neither factor moves on this information — if anything
+the probability was correctly estimated and is now simply confirmed rather
+than feared. The register's escalation rule asks for measured evidence or
+an **accepted fallback**, and a headcount is neither.
+
+### The decision this needs
+
+One of two things, recorded here when it happens:
+
+1. **Cut v1 scope** to what one developer can deliver, and mark the
+   removed items as post-v1 in `V1_SCOPE.md`; or
+2. **Explicitly accept the overrun**, in the same style as R-13, R-15, and
+   R-16 — stating that v1 is a multi-year solo effort and that schedule
+   risk is being carried deliberately.
+
+Note the interaction with R-16: with no user research available, a scope
+cut cannot be aimed by evidence of what users need. It would have to be
+made on the developer's own judgement of what a DAW minimally is. That is
+a legitimate basis; it is just worth naming, because the two accepted
+risks compound rather than sit independently.
+
+Until one of these is recorded, treat every delivery estimate downstream
+as unbounded.
 
 ## User-research coverage gap
 
