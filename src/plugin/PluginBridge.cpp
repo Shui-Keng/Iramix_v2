@@ -43,6 +43,7 @@ constexpr std::uint32_t kStateResultOk = 0U;
 constexpr std::uint32_t kStateResultRejected = 1U;
 
 constexpr std::uint32_t kMaximumParameterQueueCapacity = 4'096U;
+constexpr std::uint32_t kMaximumMidiQueueCapacity = 4'096U;
 
 // One control-thread-to-plugin parameter change. Plain fixed-width members
 // only: the host writes these, the child reads them, and publication is the
@@ -51,6 +52,22 @@ struct SharedParameterEvent final {
     std::uint64_t sampleTime;
     std::uint32_t parameterId;
     float value;
+};
+
+constexpr std::uint8_t kMidiEventNoteOn = 0U;
+constexpr std::uint8_t kMidiEventNoteOff = 1U;
+
+// One control-thread-to-plugin MIDI note. Separate from
+// SharedParameterEvent rather than reusing its shape: a note is
+// channel/pitch/velocity, not a single float value, and the two queues
+// are sized and saturate independently.
+struct SharedMidiEvent final {
+    std::uint64_t sampleTime;
+    std::uint8_t type;
+    std::uint8_t channel;
+    std::uint8_t pitch;
+    std::uint8_t reserved;
+    float velocity;
 };
 
 [[nodiscard]] std::uint32_t roundUpToPowerOfTwo(std::uint32_t value)
@@ -136,6 +153,14 @@ struct SharedControl final {
     // lock-free guarantee resting on the uint32/uint64 specializations
     // already asserted below rather than adding a new one.
     std::atomic<std::uint32_t> vst3FirstParameterDefaultBits;
+    // Single-producer/single-consumer MIDI ring. Same shape and the same
+    // ownership rules as the parameter ring, kept separate so a note
+    // burst and an automation burst saturate independently.
+    std::atomic<std::uint32_t> midiCapacity;
+    std::atomic<std::uint32_t> midiWrite;
+    std::atomic<std::uint32_t> midiRead;
+    std::atomic<std::uint64_t> midiEventsApplied;
+    std::atomic<std::uint64_t> midiEventsLate;
 };
 
 static_assert(
@@ -152,17 +177,29 @@ static_assert(
     "parameter events must land aligned in the shared region"
 );
 
+// The MIDI ring is placed directly after the parameter ring; since the
+// parameter ring is already known-aligned and a whole number of
+// SharedParameterEvent, this holds as long as the two events share an
+// alignment.
+static_assert(
+    alignof(SharedMidiEvent) == alignof(SharedParameterEvent)
+        && sizeof(SharedParameterEvent) % alignof(SharedMidiEvent) == 0U,
+    "MIDI events must land aligned in the shared region"
+);
+
 [[nodiscard]] std::size_t regionBytes(
     const std::uint32_t maximumFrames,
     const std::uint32_t channelCount,
     const std::uint32_t maximumStateBytes,
-    const std::uint32_t parameterCapacity
+    const std::uint32_t parameterCapacity,
+    const std::uint32_t midiCapacity
 ) noexcept {
     const auto samples = static_cast<std::size_t>(maximumFrames)
         * static_cast<std::size_t>(channelCount);
     return sizeof(SharedControl) + samples * sizeof(float) * 2U
         + static_cast<std::size_t>(parameterCapacity)
             * sizeof(SharedParameterEvent)
+        + static_cast<std::size_t>(midiCapacity) * sizeof(SharedMidiEvent)
         + static_cast<std::size_t>(maximumStateBytes);
 }
 
@@ -188,13 +225,24 @@ static_assert(
     );
 }
 
-[[nodiscard]] std::byte* stateBase(
+[[nodiscard]] SharedMidiEvent* midiBase(
     SharedControl* const control,
     const std::size_t samples,
     const std::uint32_t parameterCapacity
 ) noexcept {
-    return reinterpret_cast<std::byte*>(
+    return reinterpret_cast<SharedMidiEvent*>(
         parameterBase(control, samples) + parameterCapacity
+    );
+}
+
+[[nodiscard]] std::byte* stateBase(
+    SharedControl* const control,
+    const std::size_t samples,
+    const std::uint32_t parameterCapacity,
+    const std::uint32_t midiCapacity
+) noexcept {
+    return reinterpret_cast<std::byte*>(
+        midiBase(control, samples, parameterCapacity) + midiCapacity
     );
 }
 
@@ -336,11 +384,14 @@ struct PluginBridge::Impl final {
     PluginBridgeCounters counters {};
     bool started {false};
     std::uint32_t parameterCapacity {0U};
+    std::uint32_t midiCapacity {0U};
     std::uint64_t samplePosition {0U};
     // Mirrors the newest queued timestamp so an out-of-order enqueue can be
     // refused without reading an index the plugin process also writes.
     std::uint64_t lastParameterTime {0U};
     bool hasParameterTime {false};
+    std::uint64_t lastMidiTime {0U};
+    bool hasMidiTime {false};
 
 #if defined(_WIN32)
     HANDLE mapping {nullptr};
@@ -465,7 +516,8 @@ std::unique_ptr<PluginBridge> PluginBridge::create(
         || (config.maximumStateBytes > 0U
             && config.stateDeadline <= std::chrono::milliseconds::zero())
         || config.parameterQueueCapacity
-            > kMaximumParameterQueueCapacity) {
+            > kMaximumParameterQueueCapacity
+        || config.midiQueueCapacity > kMaximumMidiQueueCapacity) {
         error = "plugin bridge configuration is out of range";
         return {};
     }
@@ -484,12 +536,16 @@ std::unique_ptr<PluginBridge> PluginBridge::create(
     impl->parameterCapacity = config.parameterQueueCapacity == 0U
         ? 0U
         : roundUpToPowerOfTwo(config.parameterQueueCapacity);
+    impl->midiCapacity = config.midiQueueCapacity == 0U
+        ? 0U
+        : roundUpToPowerOfTwo(config.midiQueueCapacity);
 
     const auto bytes = regionBytes(
         config.maximumFrames,
         config.channelCount,
         config.maximumStateBytes,
-        impl->parameterCapacity
+        impl->parameterCapacity,
+        impl->midiCapacity
     );
     impl->mappedBytes = bytes;
 
@@ -596,6 +652,10 @@ std::unique_ptr<PluginBridge> PluginBridge::create(
     );
     impl->control->parameterCapacity.store(
         impl->parameterCapacity,
+        std::memory_order_relaxed
+    );
+    impl->control->midiCapacity.store(
+        impl->midiCapacity,
         std::memory_order_relaxed
     );
 #if defined(_WIN32)
@@ -815,6 +875,12 @@ PluginBridgeCounters PluginBridge::counters() const noexcept {
             );
         snapshot.parametersLate =
             impl_->control->parametersLate.load(std::memory_order_relaxed);
+        snapshot.midiEventsApplied =
+            impl_->control->midiEventsApplied.load(
+                std::memory_order_relaxed
+            );
+        snapshot.midiEventsLate =
+            impl_->control->midiEventsLate.load(std::memory_order_relaxed);
     }
     return snapshot;
 }
@@ -880,6 +946,69 @@ PluginParameterStatus PluginBridge::setParameter(
     );
 }
 
+PluginMidiStatus PluginBridge::enqueueMidiEvent(
+    const std::uint8_t type,
+    const std::int16_t pitch,
+    const float velocity,
+    const std::uint64_t sampleTime
+) noexcept {
+    if (!impl_->started
+        || impl_->control == nullptr
+        || impl_->midiCapacity == 0U) {
+        return PluginMidiStatus::unavailable;
+    }
+    // Refused rather than reordered, for the same reason as
+    // setParameterById(): a rendered result that depends on delivery
+    // order rather than the timeline is not reproducible from the
+    // session.
+    if (impl_->hasMidiTime && sampleTime < impl_->lastMidiTime) {
+        ++impl_->counters.midiOutOfOrder;
+        return PluginMidiStatus::outOfOrder;
+    }
+
+    auto* const control = impl_->control;
+    const auto write = control->midiWrite.load(std::memory_order_relaxed);
+    const auto read = control->midiRead.load(std::memory_order_acquire);
+    if (write - read >= impl_->midiCapacity) {
+        ++impl_->counters.midiOverflows;
+        return PluginMidiStatus::queueFull;
+    }
+
+    auto* const slot =
+        midiBase(control, impl_->sampleCount(), impl_->parameterCapacity)
+        + (write & (impl_->midiCapacity - 1U));
+    slot->sampleTime = sampleTime;
+    slot->type = type;
+    slot->channel = 0U;
+    slot->pitch = static_cast<std::uint8_t>(
+        std::clamp<std::int16_t>(pitch, 0, 127)
+    );
+    slot->reserved = 0U;
+    slot->velocity = std::clamp(velocity, 0.0F, 1.0F);
+    control->midiWrite.store(write + 1U, std::memory_order_release);
+
+    impl_->lastMidiTime = sampleTime;
+    impl_->hasMidiTime = true;
+    ++impl_->counters.midiEventsSent;
+    return PluginMidiStatus::accepted;
+}
+
+PluginMidiStatus PluginBridge::sendMidiNoteOn(
+    const std::int16_t pitch,
+    const float velocity,
+    const std::uint64_t sampleTime
+) noexcept {
+    return enqueueMidiEvent(kMidiEventNoteOn, pitch, velocity, sampleTime);
+}
+
+PluginMidiStatus PluginBridge::sendMidiNoteOff(
+    const std::int16_t pitch,
+    const float velocity,
+    const std::uint64_t sampleTime
+) noexcept {
+    return enqueueMidiEvent(kMidiEventNoteOff, pitch, velocity, sampleTime);
+}
+
 PluginParameterMetadata PluginBridge::parameterMetadata() const noexcept {
     if (impl_->control == nullptr
         || impl_->control->childReady.load(std::memory_order_acquire)
@@ -924,7 +1053,8 @@ PluginStateStatus PluginBridge::restoreState(
             stateBase(
                 control,
                 impl_->sampleCount(),
-                impl_->parameterCapacity
+                impl_->parameterCapacity,
+                impl_->midiCapacity
             ),
             state.data(),
             state.size()
@@ -1004,7 +1134,8 @@ PluginStateStatus PluginBridge::captureState(
             stateBase(
                 control,
                 impl_->sampleCount(),
-                impl_->parameterCapacity
+                impl_->parameterCapacity,
+                impl_->midiCapacity
             ),
             produced
         );
@@ -1130,7 +1261,8 @@ int PluginBridge::runChild(
         header->maximumFrames.load(std::memory_order_relaxed),
         header->channelCount.load(std::memory_order_relaxed),
         header->maximumStateBytes.load(std::memory_order_relaxed),
-        header->parameterCapacity.load(std::memory_order_relaxed)
+        header->parameterCapacity.load(std::memory_order_relaxed),
+        header->midiCapacity.load(std::memory_order_relaxed)
     );
     UnmapViewOfFile(header);
     control = static_cast<SharedControl*>(
@@ -1182,7 +1314,8 @@ int PluginBridge::runChild(
         header->maximumFrames.load(std::memory_order_relaxed),
         header->channelCount.load(std::memory_order_relaxed),
         header->maximumStateBytes.load(std::memory_order_relaxed),
-        header->parameterCapacity.load(std::memory_order_relaxed)
+        header->parameterCapacity.load(std::memory_order_relaxed),
+        header->midiCapacity.load(std::memory_order_relaxed)
     );
     ::munmap(header, sizeof(SharedControl));
     void* const mapped = ::mmap(
@@ -1217,6 +1350,8 @@ int PluginBridge::runChild(
     );
     const auto parameterCapacity =
         control->parameterCapacity.load(std::memory_order_relaxed);
+    const auto midiCapacity =
+        control->midiCapacity.load(std::memory_order_relaxed);
 
     // Live state of the stand-in plugin. The default stands in for a
     // freshly instantiated plugin that has never been given a blob.
@@ -1352,7 +1487,7 @@ int PluginBridge::runChild(
         if (stateSequence != lastStateSequence && stateCapacity != 0U) {
             lastStateSequence = stateSequence;
             std::byte* const blob =
-                stateBase(control, capacity, parameterCapacity);
+                stateBase(control, capacity, parameterCapacity, midiCapacity);
             const auto stateKind =
                 control->stateRequest.load(std::memory_order_relaxed);
             if (stateKind == kStateRequestRestore) {
@@ -1523,6 +1658,67 @@ int PluginBridge::runChild(
                 );
                 if (late != 0U) {
                     control->parametersLate.fetch_add(
+                        late,
+                        std::memory_order_relaxed
+                    );
+                }
+            }
+        }
+
+        // Same windowing discipline as parameter events: drained before
+        // the block renders, only up to the block's own end, so a note
+        // scheduled for a later block waits rather than firing early. The
+        // stand-in has no MIDI concept, so this only ever does anything
+        // in vst3 mode; a stub-mode child with midiCapacity != 0 simply
+        // advances its read index without acting on the events, which
+        // still lets the bridge-level transport be tested independently
+        // of a real plugin (see the "healthy path" stub-mode tests).
+        if (midiCapacity != 0U) {
+            const auto blockStart =
+                control->blockStartSample.load(std::memory_order_relaxed);
+            const auto blockEnd = blockStart + frames;
+            auto* const events = midiBase(control, capacity, parameterCapacity);
+            auto readIndex =
+                control->midiRead.load(std::memory_order_relaxed);
+            const auto writeIndex =
+                control->midiWrite.load(std::memory_order_acquire);
+            std::uint64_t applied = 0U;
+            std::uint64_t late = 0U;
+            while (readIndex != writeIndex) {
+                const auto& event =
+                    events[readIndex & (midiCapacity - 1U)];
+                if (event.sampleTime >= blockEnd) {
+                    break;
+                }
+                if (event.sampleTime < blockStart) {
+                    ++late;
+                }
+                if (isVst3 && vst3Opened) {
+                    if (event.type == kMidiEventNoteOn) {
+                        static_cast<void>(vst3Host.sendNoteOn(
+                            static_cast<std::int16_t>(event.pitch),
+                            event.velocity,
+                            static_cast<std::int16_t>(event.channel)
+                        ));
+                    } else if (event.type == kMidiEventNoteOff) {
+                        static_cast<void>(vst3Host.sendNoteOff(
+                            static_cast<std::int16_t>(event.pitch),
+                            event.velocity,
+                            static_cast<std::int16_t>(event.channel)
+                        ));
+                    }
+                }
+                ++applied;
+                ++readIndex;
+            }
+            if (applied != 0U) {
+                control->midiRead.store(readIndex, std::memory_order_release);
+                control->midiEventsApplied.fetch_add(
+                    applied,
+                    std::memory_order_relaxed
+                );
+                if (late != 0U) {
+                    control->midiEventsLate.fetch_add(
                         late,
                         std::memory_order_relaxed
                     );

@@ -19,6 +19,7 @@
 #include "pluginterfaces/vst/ivstaudioprocessor.h"
 #include "pluginterfaces/vst/ivstcomponent.h"
 #include "pluginterfaces/vst/ivsteditcontroller.h"
+#include "pluginterfaces/vst/ivstevents.h"
 #include "pluginterfaces/vst/ivsthostapplication.h"
 #include "pluginterfaces/vst/ivstparameterchanges.h"
 #endif
@@ -333,6 +334,65 @@ private:
     std::size_t count_ {0U};
 };
 
+// Presents this block's pending MIDI events to
+// IAudioProcessor::process(), the same way ParameterChanges presents
+// parameter automation: fixed storage the caller owns, no allocation.
+class EventList final : public Vst::IEventList {
+public:
+    explicit EventList(std::span<Vst::Event> storage) : storage_ {storage} {}
+
+    void setActiveCount(const std::size_t count) {
+        count_ = std::min(count, storage_.size());
+    }
+
+    tresult PLUGIN_API queryInterface(const TUID interfaceId, void** object)
+        override {
+        if (object == nullptr) {
+            return kInvalidArgument;
+        }
+        if (sameInterface(interfaceId, Vst::IEventList_iid)
+            || sameInterface(interfaceId, FUnknown_iid)) {
+            *object = static_cast<Vst::IEventList*>(this);
+            addRef();
+            return kResultOk;
+        }
+        *object = nullptr;
+        return kNoInterface;
+    }
+
+    uint32 PLUGIN_API addRef() override {
+        return 1U;
+    }
+
+    uint32 PLUGIN_API release() override {
+        return 1U;
+    }
+
+    int32 PLUGIN_API getEventCount() override {
+        return static_cast<int32>(count_);
+    }
+
+    tresult PLUGIN_API getEvent(const int32 index, Vst::Event& event)
+        override {
+        if (index < 0 || static_cast<std::size_t>(index) >= count_) {
+            return kInvalidArgument;
+        }
+        event = storage_[static_cast<std::size_t>(index)];
+        return kResultOk;
+    }
+
+    tresult PLUGIN_API addEvent(Vst::Event&) override {
+        // Never called for the same reason ParameterChanges::
+        // addParameterData is not: this host presents its own pre-built
+        // list rather than accepting the plugin's.
+        return kNotImplemented;
+    }
+
+private:
+    std::span<Vst::Event> storage_;
+    std::size_t count_ {0U};
+};
+
 } // namespace
 #endif
 
@@ -381,6 +441,15 @@ struct Vst3Host::Impl final {
     std::array<ParameterChangeQueue, kMaxPendingParameters>
         pendingParameterQueues {};
     std::size_t pendingParameterCount {0U};
+
+    // MIDI events queued by sendNoteOn()/sendNoteOff() since the last
+    // process() call. Bounded for the same reason as pending parameters;
+    // unlike a parameter change, a note is never coalesced into one
+    // already queued — each is a distinct event — so a full queue simply
+    // refuses the new one rather than dropping an existing note.
+    static constexpr std::size_t kMaxPendingEvents = 32U;
+    std::array<Steinberg::Vst::Event, kMaxPendingEvents> pendingEvents {};
+    std::size_t pendingEventCount {0U};
 #endif
 };
 
@@ -439,6 +508,14 @@ bool Vst3Host::parameterInfo(std::uint32_t, Vst3ParameterInfo&) const {
 }
 
 bool Vst3Host::setParameterNormalized(std::uint32_t, float) noexcept {
+    return false;
+}
+
+bool Vst3Host::sendNoteOn(std::int16_t, float, std::int16_t) noexcept {
+    return false;
+}
+
+bool Vst3Host::sendNoteOff(std::int16_t, float, std::int16_t) noexcept {
     return false;
 }
 
@@ -728,6 +805,7 @@ void Vst3Host::close() noexcept {
         impl_->component = nullptr;
     }
     impl_->pendingParameterCount = 0U;
+    impl_->pendingEventCount = 0U;
     // The module itself is deliberately left loaded. A plugin that
     // misbehaves in its unload path would turn a clean shutdown into a
     // crash, and this process is short-lived by design.
@@ -785,6 +863,14 @@ bool Vst3Host::process(
     };
     inputParameterChanges.setActiveCount(impl_->pendingParameterCount);
 
+    // Same pattern as parameter changes: built fresh over impl_-owned
+    // storage, no allocation, presenting only what changed since the
+    // previous call.
+    EventList inputEvents {
+        std::span<Steinberg::Vst::Event> {impl_->pendingEvents}
+    };
+    inputEvents.setActiveCount(impl_->pendingEventCount);
+
     Steinberg::Vst::ProcessData data {};
     data.processMode = Steinberg::Vst::kRealtime;
     data.symbolicSampleSize = Steinberg::Vst::kSample32;
@@ -796,11 +882,15 @@ bool Vst3Host::process(
     data.inputParameterChanges = impl_->pendingParameterCount > 0U
         ? &inputParameterChanges
         : nullptr;
+    data.inputEvents = impl_->pendingEventCount > 0U
+        ? &inputEvents
+        : nullptr;
 
     if (impl_->processor->process(data) != Steinberg::kResultOk) {
         return false;
     }
     impl_->pendingParameterCount = 0U;
+    impl_->pendingEventCount = 0U;
 
     for (std::uint32_t channel = 0U; channel < bridgeChannels; ++channel) {
         const auto source = channel < impl_->outputChannels
@@ -921,6 +1011,57 @@ bool Vst3Host::setParameterNormalized(
     impl_->pendingParameterQueues[impl_->pendingParameterCount]
         .reset(id, clamped);
     ++impl_->pendingParameterCount;
+    return true;
+}
+
+bool Vst3Host::sendNoteOn(
+    const std::int16_t pitch,
+    const float velocity,
+    const std::int16_t channel
+) noexcept {
+    if (!impl_->opened
+        || impl_->pendingEventCount >= Impl::kMaxPendingEvents) {
+        return false;
+    }
+    Steinberg::Vst::Event event {};
+    event.busIndex = 0;
+    event.sampleOffset = 0;
+    event.ppqPosition = 0.0;
+    event.flags = Steinberg::Vst::Event::kIsLive;
+    event.type = Steinberg::Vst::Event::kNoteOnEvent;
+    event.noteOn.channel = channel;
+    event.noteOn.pitch = pitch;
+    event.noteOn.tuning = 0.0F;
+    event.noteOn.velocity = std::clamp(velocity, 0.0F, 1.0F);
+    event.noteOn.length = 0;
+    event.noteOn.noteId = -1;
+    impl_->pendingEvents[impl_->pendingEventCount] = event;
+    ++impl_->pendingEventCount;
+    return true;
+}
+
+bool Vst3Host::sendNoteOff(
+    const std::int16_t pitch,
+    const float velocity,
+    const std::int16_t channel
+) noexcept {
+    if (!impl_->opened
+        || impl_->pendingEventCount >= Impl::kMaxPendingEvents) {
+        return false;
+    }
+    Steinberg::Vst::Event event {};
+    event.busIndex = 0;
+    event.sampleOffset = 0;
+    event.ppqPosition = 0.0;
+    event.flags = Steinberg::Vst::Event::kIsLive;
+    event.type = Steinberg::Vst::Event::kNoteOffEvent;
+    event.noteOff.channel = channel;
+    event.noteOff.pitch = pitch;
+    event.noteOff.velocity = std::clamp(velocity, 0.0F, 1.0F);
+    event.noteOff.noteId = -1;
+    event.noteOff.tuning = 0.0F;
+    impl_->pendingEvents[impl_->pendingEventCount] = event;
+    ++impl_->pendingEventCount;
     return true;
 }
 
