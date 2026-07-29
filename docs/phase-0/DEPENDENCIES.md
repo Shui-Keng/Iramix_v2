@@ -92,14 +92,41 @@ a manifest, `skiko-windows-x64.dll` (14,109,696 bytes), its checksum, and
 third-party attribution file anywhere in the jar.**
 
 The POM's Apache-2.0 covers Skiko's own source. It does not describe what
-the DLL statically links — Skia (BSD-3-Clause) and, on the evidence of
-`icudtl.dat`, ICU (Unicode licence) — both of which carry attribution
-requirements on binary redistribution.
+the DLL statically links.
 
-Action: before any distributable build, obtain the upstream third-party
-notice set for the pinned Skiko version and vendor it into the product's
-attribution file. Shipping the jar as-is does not discharge the obligation,
-and the artifact provides no text to copy.
+**Updated 2026-07-29 — the obligation is larger than this entry assumed.**
+The DLL was inspected directly rather than reasoned about. It carries
+compiled-in copyright notices for **libpng, libjpeg-turbo, and zlib**,
+a version marker for **Expat 2.7.4**, and name-level references to
+**HarfBuzz, libwebp, Wuffs, and ANGLE** — none of which this entry had
+listed. `icudtl.dat`'s header carries its own ICU notice verbatim:
+
+```text
+Copyright (C) 2016 and later: Unicode, Inc. and others.
+License & terms of use: http://www.unicode.org/copyright.html
+```
+
+So the count went from two assumed components to at least five evidenced
+by embedded copyright or version strings, plus four more by name. The
+original entry's "Skia and, on the evidence of `icudtl.dat`, ICU" was an
+undercount, and shipping an attribution file built on it would have been
+non-compliant in a way nobody would have noticed.
+
+[`NOTICE.md`](../../NOTICE.md) now carries what was verified, with the
+verbatim attribution strings and an evidence grade per component.
+
+Action, narrowed by that finding: obtain the upstream third-party notice
+set for the pinned Skiko version and reconcile it against `NOTICE.md`.
+The file is a floor, not a discharge — **L-1 stays open**, because:
+
+- only `windows-x64` was inspected; the other four target jars resolve to
+  POMs until a build selects them, and Linux/macOS may link components
+  Windows does not (FreeType is absent from the Windows library and is
+  the obvious candidate elsewhere);
+- string scanning cannot prove absence, so a component that leaves no
+  string would not appear at all;
+- licence *versions* in `NOTICE.md` are as upstream publishes them today,
+  not as they stood when Skiko 0.150.1 was built.
 
 ### L-2 — JACK client library licence is unverified from here
 
@@ -117,6 +144,50 @@ Ubuntu runner and record the actual SPDX identifiers, then confirm the
 link is dynamic. Until then, treat Linux JACK as spike-only, which it
 currently is.
 
+**Closed 2026-07-29 with measured evidence.** The Ubuntu CI job gained a
+"Record JACK licence and link type" step, and its output replaces the
+upstream reputation the paragraph above rested on. Read from
+`ubuntu-latest`, packages `libjack-jackd2-0` and `libjack-jackd2-dev`
+version `1.9.21~dfsg-3ubuntu3`:
+
+```text
+--- copyright stanzas governing the client library ---
+Files: * => License: LGPL-2.1+
+Files: common/JackAudioDriver.cpp => License: GPL-2~or
+Files: tools/zalsa/* => License: GPL-3+
+
+--- pkg-config link flags ---
+-ljack
+
+--- library files shipped (.so = dynamic, .a = static) ---
+/usr/lib/x86_64-linux-gnu/libjack.so
+/usr/lib/x86_64-linux-gnu/libjack.so.0
+```
+
+Three findings, in order of how much they settle:
+
+1. **Static linking is impossible, not merely discouraged.** The packages
+   ship `libjack.so` and `libjack.so.0` and **no `.a` at all**. The
+   policy violation this entry worried about cannot be committed through
+   these packages even by accident.
+2. **The client library is LGPL-2.1+.** The blanket `Files: *` stanza
+   governs it. The GPL entries that appear in a naive licence listing
+   apply to one server source file and to the `zalsa` tools, neither of
+   which is linked here — which is exactly why the sorted `License:`
+   lines alone were not enough, and the step pairs each `Files:` glob
+   with its licence.
+3. `pkg-config --libs jack` emits `-ljack` with no `-static`.
+
+Dynamic linking against an LGPL-2.1+ client library satisfies "no GPL
+dependency in a closed-source path". Linux JACK no longer needs to be
+treated as spike-only on licensing grounds; it remains a spike for the
+unrelated reason that no Linux hardware exists to run it on (R-13).
+
+The step **prints rather than asserts**, deliberately: an upstream
+relicence should surface as a visible diff in a log, not as a red build
+that no one here could reproduce or diagnose without a Linux machine.
+Re-read it on any distribution or JACK version bump.
+
 ### L-3 — CI actions are pinned to mutable tags
 
 `@v7`, `@v5`, and `@v6` are branch-like major tags that upstream can
@@ -127,6 +198,20 @@ that the code had changed.
 Action: pin each action to a full commit SHA with the version in a
 trailing comment. This costs nothing and is the standard hardening for
 third-party actions.
+
+**Closed 2026-07-29.** All four `uses:` entries in
+`.github/workflows/ci.yml` are pinned:
+
+| Action | Commit SHA | Version at pinning |
+|---|---|---|
+| `actions/checkout` | `3d3c42e5aac5ba805825da76410c181273ba90b1` | v7.0.1 |
+| `actions/setup-java` | `03ad4de0992f5dab5e18fcb136590ce7c4a0ac95` | v5.6.0 |
+| `gradle/actions/setup-gradle` | `3f131e8634966bd73d06cc69884922b02e6faf92` | v6.2.0 |
+
+Each SHA was resolved from the major tag and then confirmed identical to
+the exact version tag, so the trailing comments describe the pinned
+commit rather than merely the tag that pointed at it. Updating an action
+is now a visible diff with a reviewable SHA change.
 
 ### L-4 — Two `org.jetbrains:annotations` versions coexist
 

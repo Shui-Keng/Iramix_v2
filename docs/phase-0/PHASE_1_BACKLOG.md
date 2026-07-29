@@ -51,9 +51,9 @@ Nothing shippable can be built until these close.
 
 | ID | Item | Size | Traces to |
 |---|---|---|---|
-| P1-B1 | Skiko native attribution: produce the notice file covering the Skia and ICU binaries shipped in the runtime jars | S | L-1, R-14 |
-| P1-B2 | Verify the JACK client library licence from an authoritative source | S | L-2 |
-| P1-B3 | Pin CI actions to immutable SHAs instead of mutable tags | S | L-3 |
+| P1-B1 | Skiko native attribution — **partially done 2026-07-29**: `NOTICE.md` carries the verified components, and inspecting the artifact found at least seven third-party components where this entry had assumed two. Remaining: obtain Skiko's upstream third-party manifest, and scan the four target jars that were never fetched | M | L-1, R-14 |
+| ~~P1-B2~~ | ~~Verify the JACK client library licence~~ — **done 2026-07-29**: measured on the Ubuntu runner. The client library is LGPL-2.1+ under the blanket `Files: *` stanza, the packages ship no `.a` so static linking is impossible, and `pkg-config` emits a plain `-ljack` | S | L-2, closed |
+| ~~P1-B3~~ | ~~Pin CI actions to immutable SHAs~~ — **done 2026-07-29**: all four `uses:` entries pinned to full commit SHAs with version comments | S | L-3, closed |
 | P1-B4 | Resolve the two coexisting `org.jetbrains:annotations` versions | S | L-4 |
 | P1-B5 | Sign the Steinberg ASIO developer agreement before ASIO enters a public build | S | R-09 |
 | P1-B6 | Automate the vulnerability inventory | M | P0-010 |

@@ -23,20 +23,46 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
         with:
           distribution: temurin
           java-version: "21"
 
-      - uses: gradle/actions/setup-gradle@v6
+      - uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0
         with:
           gradle-version: "9.6.1"
 
       - name: Install JACK development package and Xvfb
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libjack-jackd2-dev xvfb
+
+      # L-2: the JACK licence claim in DEPENDENCIES.md came from upstream
+      # reputation, not an inspected package, because this project has no
+      # Linux machine (R-13). The Ubuntu runner does, so it reads the
+      # actual copyright file and the actual link type. Printed, not
+      # asserted: an upstream relicence should show up as a visible diff
+      # in the log rather than a red build nobody can reproduce locally.
+      - name: Record JACK licence and link type
+        if: runner.os == 'Linux'
+        run: |
+          echo "--- dpkg package versions ---"
+          dpkg-query -W -f='${Package} ${Version}\n' libjack-jackd2-dev libjack-jackd2-0 || true
+          echo "--- declared SPDX identifiers in copyright ---"
+          grep -iE '^License:' /usr/share/doc/libjack-jackd2-dev/copyright \
+            | sort -u || true
+          echo "--- pkg-config link flags ---"
+          pkg-config --libs jack || true
+          echo "--- library files shipped (.so = dynamic, .a = static) ---"
+          dpkg -L libjack-jackd2-dev libjack-jackd2-0 2>/dev/null \
+            | grep -E '\.(so|a)($|\.)' | sort || true
+          # The sorted License: lines above cover the whole jackd2 source
+          # package, server included, so they cannot say which licence
+          # governs the client library specifically. These stanzas can.
+          echo "--- copyright stanzas governing the client library ---"
+          awk '/^Files:/{f=$0} /^License:/{if (f ~ /common|libjack|\*/) print f" => "$0}' \
+            /usr/share/doc/libjack-jackd2-dev/copyright | sort -u || true
 
       - name: Configure
         run: cmake --preset ${{ matrix.preset }}
@@ -72,7 +98,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install JACK development package
         run: sudo apt-get update && sudo apt-get install -y libjack-jackd2-dev
