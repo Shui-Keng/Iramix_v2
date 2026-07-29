@@ -72,16 +72,20 @@ Exit evidence:
 
 Exit evidence:
 
-- matching reference screenshots — done for `windows-x64`. Baselines are
-  stored per Skiko target and macOS/Linux have none committed, so those
-  legs report `baseline=absent` and print a digest instead of failing.
-  Whether CPU raster output is bit-identical across operating systems is
-  deliberately left as an open question rather than assumed;
+- matching reference screenshots — done on all three operating systems.
+  CI showed the four digests are **bit-identical** on `windows-x64`,
+  `macos-arm64`, and `linux-x64`, across x86-64 and aarch64 alike, so
+  the same baselines are committed for all three and the comparison now
+  guards every CI leg. `macos-x64` and `linux-arm64` have never run and
+  report `baseline=absent`;
 - documented text shaping and font fallback behavior — done, with a
-  finding: `TextLine.make` shapes with a single font and does **not**
-  consult the font manager, so Japanese and emoji resolve entirely to
-  `.notdef` against Segoe UI while still reporting a plausible width.
-  Iramix must drive fallback itself;
+  finding that strengthened when it ran cross-platform: `TextLine.make`
+  shapes with a single font and does **not** consult the font manager.
+  Coverage is not portable — Arabic renders on Windows and Linux but is
+  9/10 `.notdef` on macOS's Helvetica Neue, ASCII advance widths differ
+  by up to 15% between platforms, and the Ubuntu runner has no Japanese
+  face to fall back to at all. Iramix must drive fallback itself and
+  must not hard-code measured text extents;
 - raster performance baseline — done for CPU raster only. Full-scene
   repaint costs 6.0–12.0 ms p50 across the four scales, which misses a
   120 Hz budget from 150% upward on the reference machine.
@@ -175,7 +179,7 @@ stand-in, not a real CLAP or VST3.
 | P0-002 | v1 scope contract | Draft complete |
 | P0-003 | Repository and CMake skeleton | Complete; Windows build verified |
 | P0-004 | Three-OS skeleton CI | Complete; Windows/macOS/Linux build and test matrix green |
-| P0-005 | Java/Skiko renderer spike | Windows reference window runs. Raster slice done: a deterministic dense-arrangement scene (controls, waveform geometry, automation curves) renders byte-identically across processes, is compared against committed per-target PNG baselines at 100/125/150/200% in `gradle check` on all three CI OSes, and the comparison is verified by a one-LSB perturbation that fails all four scales. CPU raster full repaint measured at 6.0–12.0 ms p50, which misses 120 Hz from 150% upward. Text shaping and font fallback documented rather than baselined: `TextLine.make` does not consult the font manager, so CJK and emoji shape entirely to `.notdef`. Frame-time tail is unattributed — GC counters rule the JVM heap out. GPU backend, windowing, presentation, device loss, and real HiDPI surfaces all untouched (R-03) |
+| P0-005 | Java/Skiko renderer spike | Windows reference window runs. Raster slice done: a deterministic dense-arrangement scene (controls, waveform geometry, automation curves) renders byte-identically across processes, is compared against committed per-target PNG baselines at 100/125/150/200% in `gradle check` on all three CI OSes, and the comparison is verified by a one-LSB perturbation that fails all four scales. Raster output is measured bit-identical on Windows x86-64, macOS arm64, and Linux x86-64, so all three carry baselines and are guarded. CPU raster full repaint measured at 6.0–12.0 ms p50, which misses 120 Hz from 150% upward. Text shaping and font fallback documented rather than baselined: `TextLine.make` does not consult the font manager, so CJK and emoji shape entirely to `.notdef`. Frame-time tail is unattributed — GC counters rule the JVM heap out. GPU backend, windowing, presentation, device loss, and real HiDPI surfaces all untouched (R-03) |
 | P0-006 | UI toolchain bootstrap | Pinned bootstrap verified on Windows |
 | P0-007 | Java–C++ process boundary | Complete for Phase 0 stdio transport; persistent handshake/load smoke green on three-OS CI |
 | P0-008 | Audio callback probes | Windows open: 64 cadence failed; Core Audio/JACK probes added but target runs pending; proprietary SDK path resolved, signing pending; three 2h soaks pending; shared-mode path first exercised via session device restoration, which fixed an exclusive-mode-shaped buffer assertion and a deadline target table that returned zero outside 64/128/256 (see DEVICE_ENUMERATION_WINDOWS_2026-07-28) |

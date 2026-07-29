@@ -92,6 +92,42 @@ p50PerMpx=2.309ms gcCount=1 gcMillis=3
 The four digests were identical across five separate JVM invocations, so
 determinism holds across processes and not merely within one.
 
+## Raster output is bit-identical on all three operating systems
+
+This was written as an open question and CI answered it on the first
+run. All four digests are **identical** on `windows-x64`,
+`macos-arm64`, and `linux-x64`:
+
+```text
+scale=100% target=macos-arm64 baseline=absent repeatable=true
+digest=20b8d6cf5a82d56689b80aa19005a300e7023b1a21c7e1e2d701cdd7917b4cf8
+scale=100% target=linux-x64   baseline=absent repeatable=true
+digest=20b8d6cf5a82d56689b80aa19005a300e7023b1a21c7e1e2d701cdd7917b4cf8
+scale=200% target=macos-arm64 baseline=absent repeatable=true
+digest=ec2705425c2d948b7a307b70cfdd6b105e0afb69df900c311c3cd7b3e386480a
+scale=200% target=linux-x64   baseline=absent repeatable=true
+digest=ec2705425c2d948b7a307b70cfdd6b105e0afb69df900c311c3cd7b3e386480a
+```
+
+This holds **across CPU architectures**, not merely across operating
+systems: the macOS runner is arm64 and the other two are x86-64, so
+Skia's CPU raster pipeline is producing identical output through
+different SIMD paths.
+
+Because the digest is taken over exactly the bytes the baseline PNG
+encodes, and the Windows run reports `baseline=match` against that PNG,
+the Windows captures **are** the correct macOS and Linux baselines. They
+are now committed under `baselines/macos-arm64/` and
+`baselines/linux-x64/`, so the screenshot comparison guards all three
+operating systems rather than one. Only the two targets that actually
+ran are committed; `macos-x64` and `linux-arm64` have no evidence and
+therefore no baseline.
+
+This is a portability result, not a performance one. The CI legs also
+print frame times and those figures are **not** quoted anywhere in this
+document: per R-13, hosted runners are evidence of correctness and
+portability only, and the Windows CI leg builds Debug besides.
+
 ## The comparison was verified by breaking it
 
 A comparator that never fails proves nothing. `ACCENT` was changed from
@@ -152,6 +188,38 @@ That is a Phase 1 requirement, not a defect in Skiko.
 no ligature or contextual form was applied on that path; Arabic needs
 joining behaviour that a per-codepoint mapping does not provide. The
 sample is recorded as a marker, not as a claim that RTL works.
+
+### The same run on macOS and Linux
+
+Unlike the pixels, **text behaviour does not survive the platform
+change** — which is the strongest available argument that fallback
+cannot be left to the toolkit:
+
+| Sample | Windows (Segoe UI) | macOS (Helvetica Neue) | Linux (DejaVu Sans) |
+|---|---|---|---|
+| ascii | 0 missing, w 133.01 | 0 missing, w 141.09 | 0 missing, w 153.40 |
+| latin-diacritics | 0 missing | 0 missing | 0 missing |
+| cjk | 5 missing → Yu Gothic UI | 5 missing → Hiragino Sans | 5 missing → **none** |
+| rtl-arabic | 0 missing | **9 missing** → Geeza Pro | 0 missing |
+| emoji-astral | 2 missing → Segoe UI Emoji | 2 missing → Apple Color Emoji | 2 missing → Noto Color Emoji |
+
+Three things follow.
+
+**No single UI face covers the same scripts everywhere.** Arabic is
+covered by Segoe UI and DejaVu Sans but *not* by Helvetica Neue, where
+9 of 10 codepoints are `.notdef`. A layout tested only on Windows would
+show Arabic correctly and break on macOS.
+
+**Advance widths differ by up to 15% for identical ASCII** — 133.01 on
+Windows against 153.40 on Linux. Any layout that measures text on one
+platform and hard-codes the result will overflow on another.
+
+**The Ubuntu runner cannot render Japanese at all**: `fallback=none`,
+with only 19 font families installed against 81 and 180 elsewhere. That
+is a property of the runner image rather than of Linux, but it makes the
+failure mode concrete — on a host with no covering face, there is
+nothing to fall back *to*, and the UI must degrade deliberately instead
+of drawing boxes.
 
 ## Cost, against a frame budget
 
@@ -222,16 +290,20 @@ It does not prove:
   as running on a 125% display. No AWT/Skiko surface, no
   `GraphicsConfiguration` transform, and no multi-monitor coordinate
   conversion is exercised — that part of Week 2 is still open;
-- **that raster output is identical across operating systems.** The
-  question is deliberately left open rather than assumed. Baselines are
-  stored per Skiko target, and a target without one reports
-  `baseline=absent` instead of failing. macOS and Linux CI legs will
-  print their digests; comparing them against the four above is what
-  would answer this, and it has not been done;
+- **that raster output is identical on targets that have not run.**
+  `windows-x64`, `macos-arm64`, and `linux-x64` are measured identical
+  and now all carry baselines. `macos-x64` and `linux-arm64` have never
+  been executed, hold no baseline, and report `baseline=absent`. The
+  identity is also observed, not explained: nothing here establishes
+  *why* Skia's raster pipeline is architecture-independent, so it is a
+  measurement to re-check when Skiko is upgraded, not a guarantee to
+  design against;
 - **anything about text rendering.** Text is measured, never captured.
   No glyph is compared against a baseline at any scale, subpixel
   positioning and hinting are set but unverified, and the Arabic sample
-  demonstrates only that shaping ran — not that it is correct;
+  demonstrates only that shaping ran — not that it is correct. The
+  per-platform table shows which faces are *selected*, not that any of
+  them draws correct text;
 - **anything about accessibility, IME, or input** (R-07). None is
   touched here;
 - **anything about macOS or Linux performance** (R-13);
