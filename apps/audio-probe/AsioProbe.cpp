@@ -621,7 +621,11 @@ int listDrivers() {
     return 0;
 }
 
-int run(const std::string& driverName, const std::uint32_t seconds) {
+int run(
+    const std::string& driverName,
+    const std::uint32_t seconds,
+    const std::vector<long>& buffers
+) {
     auto mutableDriverName = std::vector<char>(
         driverName.begin(),
         driverName.end()
@@ -687,9 +691,13 @@ int run(const std::string& driverName, const std::uint32_t seconds) {
             << " driver_preferred=" << preferred
             << " driver_granularity=" << granularity
             << " callback_workload=immutable_graph_production_nodes"
-            << '\n' << std::flush;
+            << " requested_buffers=";
+        for (std::size_t index = 0U; index < buffers.size(); ++index) {
+            std::cout << (index == 0U ? "" : ",") << buffers[index];
+        }
+        std::cout << '\n' << std::flush;
 
-        for (const auto frames : std::array {64L, 128L, 256L}) {
+        for (const auto frames : buffers) {
             if (!bufferSizeSupported(
                     frames,
                     minimum,
