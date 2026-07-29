@@ -108,7 +108,7 @@ Commands:
 | 2026-07-28 | macOS initial 10-minute Core Audio run | Reference Mac and output device available |
 | 2026-07-29 | Linux initial 10-minute JACK run | JACK 48 kHz on reference interface |
 | 2026-07-30 | Compare all initial logs and freeze probe revision | Windows/macOS/Linux logs present |
-| 2026-07-31 | Windows two-hour ASIO run | Native hardware driver selected; 64 cadence issue addressed or explicitly accepted |
+| 2026-07-31 | Windows two-hour ASIO run | 64 cadence issue explicitly accepted as risk R-15 on 2026-07-29; no native hardware driver exists on this machine, so the soak runs at 128 and 256 frames and 64 is recorded as unvalidated |
 | 2026-08-01 | macOS two-hour Core Audio run | Initial Core Audio configurations accepted |
 | 2026-08-02 | Linux two-hour JACK run | Physical connections active and initial xrun behavior accepted |
 | 2026-08-03 | Week 2 evidence review | All raw logs, machine manifests, and exception notes present |

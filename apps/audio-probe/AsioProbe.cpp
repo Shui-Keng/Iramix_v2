@@ -1,3 +1,4 @@
+#include "GraphWorkload.hpp"
 #include "iramix/realtime/Audit.hpp"
 
 #include <asiosys.h>
@@ -15,6 +16,7 @@
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -36,9 +38,11 @@ struct Context {
     long frames {0L};
     std::uint32_t seconds {0U};
     std::array<ASIOBufferInfo, kOutputChannels> buffers {};
-    std::array<long, kOutputChannels> bytesPerSample {};
-    std::vector<float> input;
-    std::vector<float> output;
+    std::array<ASIOSampleType, kOutputChannels> sampleTypes {};
+    // Constructed before ASIOStart: the graph allocates its plan and
+    // planar storage here, never inside the callback.
+    std::unique_ptr<audio_probe::StereoGraphWorkload> workload;
+    std::uint64_t samplePosition {0U};
     std::vector<std::uint64_t> durations;
     std::atomic<std::uint64_t> callbackCount {0U};
     std::atomic<std::uint64_t> measuredCount {0U};
@@ -71,32 +75,91 @@ Context* activeContext = nullptr;
     }
 }
 
-[[nodiscard]] long sampleBytes(const ASIOSampleType type) {
+// Only the little-endian native formats this probe can actually write
+// are accepted. The right-aligned Int32LSBnn and every MSB variant are
+// refused up front rather than silently filled with wrong samples,
+// because a driver that reports one is a driver whose measurements
+// would not mean anything.
+[[nodiscard]] bool convertibleSampleType(const ASIOSampleType type) {
     switch (type) {
     case ASIOSTInt16LSB:
-    case ASIOSTInt16MSB:
-        return 2L;
     case ASIOSTInt24LSB:
-    case ASIOSTInt24MSB:
-        return 3L;
     case ASIOSTInt32LSB:
-    case ASIOSTInt32MSB:
     case ASIOSTFloat32LSB:
-    case ASIOSTFloat32MSB:
-    case ASIOSTInt32LSB16:
-    case ASIOSTInt32LSB18:
-    case ASIOSTInt32LSB20:
-    case ASIOSTInt32LSB24:
-    case ASIOSTInt32MSB16:
-    case ASIOSTInt32MSB18:
-    case ASIOSTInt32MSB20:
-    case ASIOSTInt32MSB24:
-        return 4L;
     case ASIOSTFloat64LSB:
-    case ASIOSTFloat64MSB:
-        return 8L;
+        return true;
     default:
-        return 0L;
+        return false;
+    }
+}
+
+void writeChannel(
+    void* const destination,
+    const float* const source,
+    const long frames,
+    const ASIOSampleType type
+) noexcept {
+    auto* const bytes = static_cast<unsigned char*>(destination);
+    for (long frame = 0L; frame < frames; ++frame) {
+        const auto sample = std::clamp(
+            source[static_cast<std::size_t>(frame)],
+            -1.0F,
+            1.0F
+        );
+        switch (type) {
+        case ASIOSTInt16LSB: {
+            const auto value = static_cast<std::int16_t>(
+                sample * 32'767.0F
+            );
+            std::memcpy(
+                bytes + frame * 2L,
+                &value,
+                sizeof(value)
+            );
+            break;
+        }
+        case ASIOSTInt24LSB: {
+            const auto value = static_cast<std::int32_t>(
+                sample * 8'388'607.0F
+            );
+            bytes[frame * 3L] =
+                static_cast<unsigned char>(value & 0xFF);
+            bytes[frame * 3L + 1L] =
+                static_cast<unsigned char>((value >> 8) & 0xFF);
+            bytes[frame * 3L + 2L] =
+                static_cast<unsigned char>((value >> 16) & 0xFF);
+            break;
+        }
+        case ASIOSTInt32LSB: {
+            const auto value = static_cast<std::int32_t>(
+                static_cast<double>(sample) * 2'147'483'647.0
+            );
+            std::memcpy(
+                bytes + frame * 4L,
+                &value,
+                sizeof(value)
+            );
+            break;
+        }
+        case ASIOSTFloat32LSB:
+            std::memcpy(
+                bytes + frame * 4L,
+                &sample,
+                sizeof(sample)
+            );
+            break;
+        case ASIOSTFloat64LSB: {
+            const auto value = static_cast<double>(sample);
+            std::memcpy(
+                bytes + frame * 8L,
+                &value,
+                sizeof(value)
+            );
+            break;
+        }
+        default:
+            return;
+        }
     }
 }
 
@@ -112,22 +175,20 @@ void processBuffer(const long bufferIndex) noexcept {
     std::uint64_t elapsedNanoseconds = 0U;
     {
         realtime::CallbackScope callback;
-        const auto samples = context->output.size();
-        for (std::size_t index = 0U; index < samples; ++index) {
-            context->output[index] = context->input[index] * 0.5F;
-        }
+        const auto frames = static_cast<std::uint32_t>(context->frames);
+        context->workload->renderBlock(frames, context->samplePosition);
+        context->samplePosition += frames;
+        const auto planar = context->workload->planarView(frames);
         for (
             std::size_t channel = 0U;
             channel < kOutputChannels;
             ++channel
         ) {
-            std::memset(
+            writeChannel(
                 context->buffers[channel].buffers[bufferIndex],
-                0,
-                static_cast<std::size_t>(
-                    context->frames
-                    * context->bytesPerSample[channel]
-                )
+                planar.channel(static_cast<int>(channel)),
+                context->frames,
+                context->sampleTypes[channel]
             );
         }
         elapsedNanoseconds = static_cast<std::uint64_t>(
@@ -334,10 +395,10 @@ bool runConfiguration(
     Context context;
     context.frames = frames;
     context.seconds = seconds;
-    const auto samples = static_cast<std::size_t>(frames)
-        * kOutputChannels;
-    context.input.assign(samples, 0.0F);
-    context.output.assign(samples, 0.0F);
+    context.workload =
+        std::make_unique<audio_probe::StereoGraphWorkload>(
+            static_cast<std::uint32_t>(frames)
+        );
     const auto maximumCallbacks =
         static_cast<std::size_t>(seconds)
             * static_cast<std::size_t>(kSampleRate)
@@ -392,11 +453,12 @@ bool runConfiguration(
             if (ASIOGetChannelInfo(&channelInfo) != ASE_OK) {
                 throw std::runtime_error("ASIOGetChannelInfo failed");
             }
-            context.bytesPerSample[channel] =
-                sampleBytes(channelInfo.type);
-            if (context.bytesPerSample[channel] == 0L) {
-                throw std::runtime_error("Unsupported ASIO sample type");
+            if (!convertibleSampleType(channelInfo.type)) {
+                throw std::runtime_error(
+                    "ASIO sample type cannot be written by this probe"
+                );
             }
+            context.sampleTypes[channel] = channelInfo.type;
         }
 
         context.outputReadySupported = ASIOOutputReady() == ASE_OK;
@@ -412,8 +474,14 @@ bool runConfiguration(
             !context.measurementComplete.load(std::memory_order_acquire)
             && Clock::now() < safetyDeadline
         ) {
+            // The telemetry queue is bounded, so a consumer that never
+            // runs turns every block into a counted drop and hides
+            // whether the engine actually lost anything. Draining here
+            // keeps that counter meaningful; it is the control thread.
+            static_cast<void>(context.workload->drainTelemetry());
             Sleep(10U);
         }
+        static_cast<void>(context.workload->drainTelemetry());
         const auto stoppedInTime = context.measurementComplete.load(
             std::memory_order_acquire
         );
@@ -515,6 +583,10 @@ bool runConfiguration(
             << audit.denormalModeEntries
             << " callback_subnormal_samples_flushed="
             << audit.subnormalSamplesFlushed
+            << " graph_blocks=" << context.workload->renderedBlocks()
+            << " graph_generation=" << context.workload->generation()
+            << " telemetry_dropped="
+            << context.workload->droppedTelemetry()
             << '\n' << std::flush;
         success = audit.allocations == 0U
             && audit.deallocations == 0U
@@ -614,6 +686,7 @@ int run(const std::string& driverName, const std::uint32_t seconds) {
             << " driver_max=" << maximum
             << " driver_preferred=" << preferred
             << " driver_granularity=" << granularity
+            << " callback_workload=immutable_graph_production_nodes"
             << '\n' << std::flush;
 
         for (const auto frames : std::array {64L, 128L, 256L}) {
