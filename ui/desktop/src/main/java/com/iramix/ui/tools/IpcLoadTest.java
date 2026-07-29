@@ -10,9 +10,12 @@ public final class IpcLoadTest {
     private static final int WARMUP_COMMANDS = 100;
     private static final int MEASURED_COMMANDS = 1_000;
     // The render loop is alive by construction, but nothing schedules it
-    // against the ping loop. Wait for it to advance one more frame so the
-    // measurement window opens on a loop proven to be producing frames.
-    private static final Duration RENDER_READY_TIMEOUT =
+    // against the ping loop. Sampling this many frames before the window
+    // opens does double duty: it proves the loop is actually advancing,
+    // and it measures the idle frame period that makes the under-load
+    // period interpretable. One frame would be noise, not a period.
+    private static final int BASELINE_FRAMES = 8;
+    private static final Duration BASELINE_TIMEOUT =
         Duration.ofSeconds(10);
     // On a fast runner the window spans barely two frame periods
     // (macOS CI: 1,000 pings in ~73ms against a ~35ms frame), so a
@@ -41,20 +44,29 @@ public final class IpcLoadTest {
                 session.ping();
             }
 
-            var framesBeforeWait = uiLoad.renderedFrames();
+            var framesBeforeBaseline = uiLoad.renderedFrames();
+            var baselineStart = System.nanoTime();
             if (
                 !uiLoad.awaitFrameAfter(
-                    framesBeforeWait,
-                    RENDER_READY_TIMEOUT
+                    framesBeforeBaseline + BASELINE_FRAMES - 1,
+                    BASELINE_TIMEOUT
                 )
             ) {
                 throw new AssertionError(
-                    "Dummy Skia UI render loop produced no frame in "
-                        + RENDER_READY_TIMEOUT.toMillis()
+                    "Dummy Skia UI render loop completed only "
+                        + (uiLoad.renderedFrames() - framesBeforeBaseline)
+                        + " of " + BASELINE_FRAMES + " baseline frames "
+                        + "in " + BASELINE_TIMEOUT.toMillis()
                         + "ms before the measurement window opened; "
                         + "the render loop never reached steady state."
                 );
             }
+            var baselineNanos = System.nanoTime() - baselineStart;
+            // The observed count, not BASELINE_FRAMES: the loop can
+            // complete further frames between the wake-up and this read,
+            // and the period must be divided by what actually happened.
+            var baselineFrames =
+                uiLoad.renderedFrames() - framesBeforeBaseline;
 
             var framesBeforeMeasurement = uiLoad.renderedFrames();
             var windowStart = System.nanoTime();
@@ -87,11 +99,28 @@ public final class IpcLoadTest {
                 frameEvidence = "IN_FLIGHT_DRAINED";
             }
 
+            // Reported side by side rather than asserted against a
+            // threshold. The under-load figure is quantized by a frame
+            // count that can be as low as one, so a ratio test here
+            // would reintroduce exactly the flakiness this task just
+            // removed. Interpreting the pair is the reader's job.
+            var idlePeriod =
+                milliseconds(baselineNanos) / baselineFrames;
+            var loadPeriod = measuredUiFrames == 0
+                ? "UNRESOLVED"
+                : String.format(
+                    Locale.ROOT,
+                    "%.3fms",
+                    milliseconds(windowNanos) / measuredUiFrames
+                );
+
             Arrays.sort(latencies);
             System.out.printf(
                 Locale.ROOT,
                 "IPC load test: os=%s commands=%d warmup=%d "
                     + "uiFrames=%d uiFrameEvidence=%s window=%.3fms "
+                    + "baselineFrames=%d framePeriodIdle=%.3fms "
+                    + "framePeriodUnderLoad=%s "
                     + "p50=%.3fms p95=%.3fms "
                     + "p99=%.3fms max=%.3fms%n",
                 session.welcome().operatingSystem(),
@@ -100,6 +129,9 @@ public final class IpcLoadTest {
                 measuredUiFrames,
                 frameEvidence,
                 milliseconds(windowNanos),
+                baselineFrames,
+                idlePeriod,
+                loadPeriod,
                 milliseconds(percentile(latencies, 50)),
                 milliseconds(percentile(latencies, 95)),
                 milliseconds(percentile(latencies, 99)),
