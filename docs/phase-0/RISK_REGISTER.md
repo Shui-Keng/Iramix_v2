@@ -25,6 +25,18 @@ Scoring: probability and impact range from 1 to 5. Priority is their product.
 Any risk with priority 16 or above must have measured evidence or an accepted
 fallback before Phase 1 begins.
 
+**Rule status as of the 2026-07-29 exit review: two of seven fail it.**
+
+| Risk | Priority | Rule satisfied? |
+|---|---:|---|
+| R-01 Scope exceeds available team capacity | 25 | **No** — no team size is recorded, so the risk cannot even be evaluated, and the v1 scope contract has not been enforced against one |
+| R-10 Custom UI consumes capacity needed by audio engine | 16 | **No** — no widget-set limit is declared and no delivery velocity was measured at week 4 or since |
+| R-02, R-03, R-04, R-13, R-15 | 20/16/16/20/20 | Yes — measured evidence or an explicitly recorded acceptance |
+
+Both failures are capacity questions rather than technical ones, and
+neither is blocked by absent hardware. See
+[`EXIT_REVIEW.md`](EXIT_REVIEW.md).
+
 ## Reference-hardware coverage gap
 
 **Status: accepted as a Phase 0 risk on 2026-07-28.**
