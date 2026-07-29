@@ -92,14 +92,41 @@ a manifest, `skiko-windows-x64.dll` (14,109,696 bytes), its checksum, and
 third-party attribution file anywhere in the jar.**
 
 The POM's Apache-2.0 covers Skiko's own source. It does not describe what
-the DLL statically links — Skia (BSD-3-Clause) and, on the evidence of
-`icudtl.dat`, ICU (Unicode licence) — both of which carry attribution
-requirements on binary redistribution.
+the DLL statically links.
 
-Action: before any distributable build, obtain the upstream third-party
-notice set for the pinned Skiko version and vendor it into the product's
-attribution file. Shipping the jar as-is does not discharge the obligation,
-and the artifact provides no text to copy.
+**Updated 2026-07-29 — the obligation is larger than this entry assumed.**
+The DLL was inspected directly rather than reasoned about. It carries
+compiled-in copyright notices for **libpng, libjpeg-turbo, and zlib**,
+a version marker for **Expat 2.7.4**, and name-level references to
+**HarfBuzz, libwebp, Wuffs, and ANGLE** — none of which this entry had
+listed. `icudtl.dat`'s header carries its own ICU notice verbatim:
+
+```text
+Copyright (C) 2016 and later: Unicode, Inc. and others.
+License & terms of use: http://www.unicode.org/copyright.html
+```
+
+So the count went from two assumed components to at least five evidenced
+by embedded copyright or version strings, plus four more by name. The
+original entry's "Skia and, on the evidence of `icudtl.dat`, ICU" was an
+undercount, and shipping an attribution file built on it would have been
+non-compliant in a way nobody would have noticed.
+
+[`NOTICE.md`](../../NOTICE.md) now carries what was verified, with the
+verbatim attribution strings and an evidence grade per component.
+
+Action, narrowed by that finding: obtain the upstream third-party notice
+set for the pinned Skiko version and reconcile it against `NOTICE.md`.
+The file is a floor, not a discharge — **L-1 stays open**, because:
+
+- only `windows-x64` was inspected; the other four target jars resolve to
+  POMs until a build selects them, and Linux/macOS may link components
+  Windows does not (FreeType is absent from the Windows library and is
+  the obvious candidate elsewhere);
+- string scanning cannot prove absence, so a component that leaves no
+  string would not appear at all;
+- licence *versions* in `NOTICE.md` are as upstream publishes them today,
+  not as they stood when Skiko 0.150.1 was built.
 
 ### L-2 — JACK client library licence is unverified from here
 
@@ -117,6 +144,20 @@ Ubuntu runner and record the actual SPDX identifiers, then confirm the
 link is dynamic. Until then, treat Linux JACK as spike-only, which it
 currently is.
 
+**Instrumented 2026-07-29; still open pending the first log.** The Ubuntu
+CI job gained a "Record JACK licence and link type" step that prints the
+installed package versions, the `License:` lines from the Debian
+copyright file, `pkg-config --libs jack`, and which library files the
+packages ship (`.so` versus `.a`). The step **prints rather than
+asserts**: an upstream relicence should surface as a visible diff in the
+log, not as a red build that no one here can reproduce without a Linux
+machine (R-13).
+
+This closes the "cannot be verified from this machine" half. It does not
+close L-2 — that needs a human to read the first log and paste the actual
+SPDX identifiers and link type into this entry, replacing the upstream
+reputation the paragraph above still rests on.
+
 ### L-3 — CI actions are pinned to mutable tags
 
 `@v7`, `@v5`, and `@v6` are branch-like major tags that upstream can
@@ -127,6 +168,20 @@ that the code had changed.
 Action: pin each action to a full commit SHA with the version in a
 trailing comment. This costs nothing and is the standard hardening for
 third-party actions.
+
+**Closed 2026-07-29.** All four `uses:` entries in
+`.github/workflows/ci.yml` are pinned:
+
+| Action | Commit SHA | Version at pinning |
+|---|---|---|
+| `actions/checkout` | `3d3c42e5aac5ba805825da76410c181273ba90b1` | v7.0.1 |
+| `actions/setup-java` | `03ad4de0992f5dab5e18fcb136590ce7c4a0ac95` | v5.6.0 |
+| `gradle/actions/setup-gradle` | `3f131e8634966bd73d06cc69884922b02e6faf92` | v6.2.0 |
+
+Each SHA was resolved from the major tag and then confirmed identical to
+the exact version tag, so the trailing comments describe the pinned
+commit rather than merely the tag that pointed at it. Updating an action
+is now a visible diff with a reviewable SHA change.
 
 ### L-4 — Two `org.jetbrains:annotations` versions coexist
 
