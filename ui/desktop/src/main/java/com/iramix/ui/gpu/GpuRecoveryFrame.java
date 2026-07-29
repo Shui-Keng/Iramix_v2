@@ -20,6 +20,7 @@ import org.jetbrains.skia.Canvas;
 import org.jetbrains.skia.PixelGeometry;
 import org.jetbrains.skiko.GraphicsApi;
 import org.jetbrains.skiko.OS;
+import org.jetbrains.skiko.RenderException;
 import org.jetbrains.skiko.SkiaLayer;
 import org.jetbrains.skiko.SkiaLayerAnalytics;
 import org.jetbrains.skiko.SkiaLayerProperties;
@@ -45,10 +46,13 @@ public final class GpuRecoveryFrame implements AutoCloseable {
     private final AtomicLong completedPresents = new AtomicLong();
     private final AtomicLong nextContextId = new AtomicLong();
     private final AtomicLong contextInitializations = new AtomicLong();
+    private final AtomicInteger injectedRenderFailures =
+        new AtomicInteger();
     private final AtomicReference<Throwable> failure =
         new AtomicReference<>();
     private final ThreadLocal<BackendFrame> drawingFrame =
         new ThreadLocal<>();
+    private final boolean deviceLossProxyEnabled;
     private final JFrame frame;
     private final SkiaLayer layer;
 
@@ -62,7 +66,9 @@ public final class GpuRecoveryFrame implements AutoCloseable {
     private int stageCallbacks;
     private int stagePresents;
 
-    private GpuRecoveryFrame() throws Exception {
+    private GpuRecoveryFrame(boolean enableRenderFailureProxy)
+        throws Exception {
+        deviceLossProxyEnabled = enableRenderFailureProxy;
         var builtFrame = new JFrame[1];
         var builtLayer = new SkiaLayer[1];
         SwingUtilities.invokeAndWait(() -> {
@@ -107,7 +113,16 @@ public final class GpuRecoveryFrame implements AutoCloseable {
 
     /** Opens a continuously rendering recovery window. */
     public static GpuRecoveryFrame open() throws Exception {
-        return new GpuRecoveryFrame();
+        return new GpuRecoveryFrame(false);
+    }
+
+    /**
+     * Opens a recovery window with a deterministic RenderException
+     * injection seam for the Slice 4 device-loss proxy.
+     */
+    public static GpuRecoveryFrame openForDeviceLossProxy()
+        throws Exception {
+        return new GpuRecoveryFrame(true);
     }
 
     /**
@@ -273,6 +288,80 @@ public final class GpuRecoveryFrame implements AutoCloseable {
         );
     }
 
+    /**
+     * Injects one RenderException inside SkiaLayer's draw scope and
+     * requires Skiko to select a fallback backend, initialize its
+     * context, and resume completed presents.
+     *
+     * <p>The injection reaches the same Skiko catch/fallback path used
+     * by a backend RenderException. It deliberately does not force a
+     * native surface-allocation failure, adapter removal, driver reset,
+     * or TDR.
+     */
+    public DeviceLossProxyResult exerciseDeviceLossProxy(
+        int requiredPresents
+    ) throws Exception {
+        if (requiredPresents < 1) {
+            throw new IllegalArgumentException(
+                "At least one recovered present is required."
+            );
+        }
+        if (!deviceLossProxyEnabled) {
+            throw new IllegalStateException(
+                "Device-loss proxy injection is not enabled."
+            );
+        }
+
+        var initialContext = awaitContextAfter(0L);
+        var initialTarget = currentTargetOnEdt();
+        beginStage(
+            initialTarget.widthPixels(),
+            initialTarget.heightPixels(),
+            initialContext
+        );
+        requestRender();
+        awaitStage(1, "device-loss proxy baseline");
+
+        var initialBackend = graphicsApi();
+        var callbacksBefore = renderCallbacks.get();
+        var presentsBefore = completedPresents.get();
+        var contextInitializationsBefore =
+            contextInitializations.get();
+
+        injectRenderExceptionOnEdt();
+        var recoveredContext = awaitContextAfter(initialContext);
+        var recoveredBackend = graphicsApi();
+        if (recoveredBackend == initialBackend) {
+            throw new IllegalStateException(
+                "Skiko did not select a fallback backend after the "
+                    + "injected RenderException: " + initialBackend
+                    + "."
+            );
+        }
+
+        var recoveredTarget = currentTargetOnEdt();
+        beginStage(
+            recoveredTarget.widthPixels(),
+            recoveredTarget.heightPixels(),
+            recoveredContext
+        );
+        requestRender();
+        awaitStage(requiredPresents, "device-loss proxy recovery");
+
+        return new DeviceLossProxyResult(
+            injectedRenderFailures.get(),
+            contextInitializations.get()
+                - contextInitializationsBefore,
+            renderCallbacks.get() - callbacksBefore,
+            completedPresents.get() - presentsBefore,
+            initialBackend,
+            recoveredBackend,
+            DeviceLossEvidence.SKIKO_RENDER_EXCEPTION_FALLBACK_PROXY,
+            NativeSurfaceAllocationFailureStatus.ACCEPTED_EVIDENCE_GAP,
+            LiteralTdrStatus.ACCEPTED_EVIDENCE_GAP
+        );
+    }
+
     /** The backend Skiko kept alive across the recovery sequence. */
     public GraphicsApi graphicsApi() {
         return layer.getRenderApi();
@@ -413,6 +502,21 @@ public final class GpuRecoveryFrame implements AutoCloseable {
 
     private void requestRender() throws Exception {
         SwingUtilities.invokeAndWait(() -> layer.needRender(false));
+    }
+
+    private void injectRenderExceptionOnEdt() throws Exception {
+        SwingUtilities.invokeAndWait(() ->
+            layer.inDrawScope$skiko(
+                scope -> {
+                    injectedRenderFailures.incrementAndGet();
+                    throw new RenderException(
+                        "Injected safe proxy for a backend "
+                            + "surface-allocation RenderException.",
+                        null
+                    );
+                }
+            )
+        );
     }
 
     private void awaitStage(
@@ -647,5 +751,33 @@ public final class GpuRecoveryFrame implements AutoCloseable {
         String backends,
         SleepWakeEvidence sleepWake,
         LiteralSleepWakeStatus literalSleepWake
+    ) {}
+
+    /** What the deterministic Slice 4 proxy actually exercises. */
+    public enum DeviceLossEvidence {
+        SKIKO_RENDER_EXCEPTION_FALLBACK_PROXY
+    }
+
+    /** Status of a real native GPU surface-allocation failure. */
+    public enum NativeSurfaceAllocationFailureStatus {
+        ACCEPTED_EVIDENCE_GAP
+    }
+
+    /** Status of literal Direct3D device removal or TDR evidence. */
+    public enum LiteralTdrStatus {
+        ACCEPTED_EVIDENCE_GAP
+    }
+
+    /** Counters from the deterministic device-loss error-path proxy. */
+    public record DeviceLossProxyResult(
+        int injectedFailures,
+        long contextInitializations,
+        long renderCallbacks,
+        long completedPresents,
+        GraphicsApi initialBackend,
+        GraphicsApi recoveredBackend,
+        DeviceLossEvidence deviceLoss,
+        NativeSurfaceAllocationFailureStatus nativeSurfaceFailure,
+        LiteralTdrStatus literalTdr
     ) {}
 }
