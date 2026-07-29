@@ -93,15 +93,33 @@ Exit evidence:
 ## Week 4: Skiko/Skia GPU spike
 
 - Exercise the Skiko hardware-accelerated surface on every operating system.
-- Record the actual Metal, Windows, and Linux rendering backends selected.
-- Simulate resize, monitor movement, sleep/wake, and device loss.
-- Measure dense arrangement rendering at 60 and 120 Hz.
+- Record the actual Metal, Windows, and Linux rendering backends selected —
+  slice 1 done on all three CI operating systems
+  ([`results/SKIA_GPU_BACKEND_FRAMETIME_2026-07-29.md`](results/SKIA_GPU_BACKEND_FRAMETIME_2026-07-29.md)):
+  `SkiaLayer.getRenderApi()` reports Direct3D on Windows, Metal on
+  macOS, and — since hosted Linux CI has no display — Skiko's own
+  software fallback under an added Xvfb step on Ubuntu CI. No real
+  Linux GPU has run this.
+- Simulate resize, monitor movement, sleep/wake, and device loss —
+  not started.
+- Measure dense arrangement rendering at 60 and 120 Hz — done on the
+  Windows reference machine, same result document: p50 sits at the
+  60 Hz budget line (16.6ms) and 120 Hz is missed even at the median;
+  the tail widens materially (p99 28ms isolated vs 67ms under
+  concurrent `gradle check` load). CI reports timings on all three
+  legs too, but hosted-runner hardware is uncontrolled and the Linux
+  leg is a different (software) rendering path, so those are not
+  compared against the reference-machine figures.
 
 Exit evidence:
 
-- frame-time traces;
-- renderer recovery test;
-- accepted backend matrix or a documented fallback.
+- frame-time traces — Windows reference machine, plus non-comparative
+  timings from all three CI legs;
+- renderer recovery test — not started (resize/monitor-move/sleep-wake/
+  device-loss slices remain);
+- accepted backend matrix or a documented fallback — done: Direct3D
+  (Windows), Metal (macOS), documented software fallback (Linux CI,
+  no GPU available under Xvfb; a real Linux GPU is still unmeasured).
 
 ## Week 5: Real-time graph
 
@@ -179,7 +197,7 @@ stand-in, not a real CLAP or VST3.
 | P0-002 | v1 scope contract | Draft complete |
 | P0-003 | Repository and CMake skeleton | Complete; Windows build verified |
 | P0-004 | Three-OS skeleton CI | Complete; Windows/macOS/Linux build and test matrix green |
-| P0-005 | Java/Skiko renderer spike | Windows reference window runs. Raster slice done: a deterministic dense-arrangement scene (controls, waveform geometry, automation curves) renders byte-identically across processes, is compared against committed per-target PNG baselines at 100/125/150/200% in `gradle check` on all three CI OSes, and the comparison is verified by a one-LSB perturbation that fails all four scales. Raster output is measured bit-identical on Windows x86-64, macOS arm64, and Linux x86-64, so all three carry baselines and are guarded. CPU raster full repaint measured at 6.0–12.0 ms p50, which misses 120 Hz from 150% upward. Text shaping and font fallback documented rather than baselined: `TextLine.make` does not consult the font manager, so CJK and emoji shape entirely to `.notdef`. Frame-time tail is unattributed — GC counters rule the JVM heap out. GPU backend, windowing, presentation, device loss, and real HiDPI surfaces all untouched (R-03) |
+| P0-005 | Java/Skiko renderer spike | Windows reference window runs. Raster slice done: a deterministic dense-arrangement scene (controls, waveform geometry, automation curves) renders byte-identically across processes, is compared against committed per-target PNG baselines at 100/125/150/200% in `gradle check` on all three CI OSes, and the comparison is verified by a one-LSB perturbation that fails all four scales. Raster output is measured bit-identical on Windows x86-64, macOS arm64, and Linux x86-64, so all three carry baselines and are guarded. CPU raster full repaint measured at 6.0–12.0 ms p50, which misses 120 Hz from 150% upward. Text shaping and font fallback documented rather than baselined: `TextLine.make` does not consult the font manager, so CJK and emoji shape entirely to `.notdef`. Frame-time tail is unattributed — GC counters rule the JVM heap out. GPU slice 1 done, backend identification across all three CI OSes: `GpuSpike` drives the same reference scene through a real `SkiaLayer` window; `SkiaLayer.getRenderApi()` reports Direct3D on Windows, Metal on macOS, and Skiko's software fallback on Ubuntu CI (added under Xvfb, since hosted Linux has no display or GPU). 200 scheduled frames are measured on the Windows reference machine at p50=16.6ms (at the 60 Hz budget line, missing 120 Hz at the median), with the tail widening under concurrent CPU load (see [`results/SKIA_GPU_BACKEND_FRAMETIME_2026-07-29.md`](results/SKIA_GPU_BACKEND_FRAMETIME_2026-07-29.md)). A real Linux GPU backend, resize, monitor movement, sleep/wake, device loss, and real HiDPI surfaces all still untouched (R-03) |
 | P0-006 | UI toolchain bootstrap | Pinned bootstrap verified on Windows |
 | P0-007 | Java–C++ process boundary | Complete for Phase 0 stdio transport; persistent handshake/load smoke green on three-OS CI |
 | P0-008 | Audio callback probes | Windows open: 64 cadence failed; Core Audio/JACK probes added but target runs pending; proprietary SDK path resolved, signing pending; three 2h soaks pending; shared-mode path first exercised via session device restoration, which fixed an exclusive-mode-shaped buffer assertion and a deadline target table that returned zero outside 64/128/256 (see DEVICE_ENUMERATION_WINDOWS_2026-07-28) |
