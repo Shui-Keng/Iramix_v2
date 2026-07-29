@@ -121,6 +121,15 @@ tasks.register("gpuRecoverySpike", JavaExec) {
     environment "IRAMIX_SKIKO_TARGET", skikoTarget
 }
 
+tasks.register("gpuContextRecoverySpike", JavaExec) {
+    group = "verification"
+    description = "Disposes and recreates Skiko backend contexts as " +
+        "a deterministic proxy for context loss, not literal sleep/wake."
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = "com.iramix.ui.tools.GpuContextRecoverySpike"
+    environment "IRAMIX_SKIKO_TARGET", skikoTarget
+}
+
 tasks.named("ipcLoadTest") {
     mustRunAfter("architectureSmoke")
 }
@@ -129,13 +138,18 @@ tasks.named("gpuRecoverySpike") {
     mustRunAfter("gpuSpike")
 }
 
+tasks.named("gpuContextRecoverySpike") {
+    mustRunAfter("gpuRecoverySpike")
+}
+
 tasks.named("check") {
     dependsOn(
         "architectureSmoke",
         "ipcLoadTest",
         "rasterSpike",
         "gpuSpike",
-        "gpuRecoverySpike"
+        "gpuRecoverySpike",
+        "gpuContextRecoverySpike"
     )
 }
 

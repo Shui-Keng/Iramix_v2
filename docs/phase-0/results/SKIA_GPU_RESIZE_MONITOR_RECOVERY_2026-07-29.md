@@ -148,8 +148,11 @@ It does not prove:
   pointer. The evidence is successful backend draw/present after each
   dimension transition, joined with pinned Skiko's recreation path, not
   a direct pointer comparison;
-- **sleep/wake or device-loss recovery.** Neither event was injected.
-  Those remain separate Week 4 slices;
+- **literal sleep/wake or device-loss recovery.** Neither event was
+  injected here. A separate deterministic context-recreation proxy is
+  measured in `SKIA_GPU_CONTEXT_RECREATION_PROXY_2026-07-29.md`, while
+  literal OS sleep/wake is explicitly accepted as an evidence gap.
+  Device loss remains a separate Week 4 slice;
 - **GPU pixel identity.** The recovery task draws the reference scene but
   does not read back or compare GPU pixels. `RasterSpike` remains the
   pixel-baseline evidence.

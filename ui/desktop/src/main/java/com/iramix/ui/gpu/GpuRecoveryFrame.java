@@ -43,16 +43,20 @@ public final class GpuRecoveryFrame implements AutoCloseable {
     private final Object progress = new Object();
     private final AtomicLong renderCallbacks = new AtomicLong();
     private final AtomicLong completedPresents = new AtomicLong();
+    private final AtomicLong nextContextId = new AtomicLong();
+    private final AtomicLong contextInitializations = new AtomicLong();
     private final AtomicReference<Throwable> failure =
         new AtomicReference<>();
-    private final ThreadLocal<Long> drawingGeneration =
-        ThreadLocal.withInitial(() -> 0L);
+    private final ThreadLocal<BackendFrame> drawingFrame =
+        new ThreadLocal<>();
     private final JFrame frame;
     private final SkiaLayer layer;
 
     private volatile boolean running = true;
+    private volatile long lastInitializedContext;
     private long activeGeneration;
     private long matchedGeneration;
+    private long expectedContextId;
     private int expectedWidthPixels;
     private int expectedHeightPixels;
     private int stageCallbacks;
@@ -130,7 +134,11 @@ public final class GpuRecoveryFrame implements AutoCloseable {
         var presentsBefore = completedPresents.get();
         for (var logicalSize : logicalSizes) {
             var target = resizeOnEdt(logicalSize);
-            beginStage(target.widthPixels(), target.heightPixels());
+            beginStage(
+                target.widthPixels(),
+                target.heightPixels(),
+                lastInitializedContext
+            );
             requestRender();
             awaitStage(presentsPerStage, "resize " + logicalSize.width
                 + "x" + logicalSize.height);
@@ -178,7 +186,11 @@ public final class GpuRecoveryFrame implements AutoCloseable {
         for (var device : devices) {
             moveToDevice(device);
             var target = currentTargetOnEdt();
-            beginStage(target.widthPixels(), target.heightPixels());
+            beginStage(
+                target.widthPixels(),
+                target.heightPixels(),
+                lastInitializedContext
+            );
             requestRender();
             awaitStage(
                 presentsPerMonitor,
@@ -202,6 +214,62 @@ public final class GpuRecoveryFrame implements AutoCloseable {
             visited,
             completedPresents.get() - presentsBefore,
             MonitorMoveStatus.VERIFIED_MULTI_MONITOR
+        );
+    }
+
+    /**
+     * Disposes and reinitializes the same SkiaLayer backend context,
+     * then requires completed presents from every replacement context.
+     *
+     * <p>This is a deterministic context-loss proxy. It does not suspend
+     * the operating system and is not evidence of literal sleep/wake.
+     */
+    public ContextRecreationResult exerciseContextRecreations(
+        int cycles,
+        int presentsPerCycle
+    ) throws Exception {
+        if (cycles < 1) {
+            throw new IllegalArgumentException(
+                "At least one context recreation is required."
+            );
+        }
+        if (presentsPerCycle < 1) {
+            throw new IllegalArgumentException(
+                "At least one present per cycle is required."
+            );
+        }
+
+        var callbacksBefore = renderCallbacks.get();
+        var presentsBefore = completedPresents.get();
+        var contextInitializationsBefore =
+            contextInitializations.get();
+        var backends = new ArrayList<String>();
+        backends.add(graphicsApi().toString());
+
+        for (var cycle = 1; cycle <= cycles; ++cycle) {
+            var target = recreateContextOnEdt();
+            beginStage(
+                target.surface().widthPixels(),
+                target.surface().heightPixels(),
+                target.contextId()
+            );
+            requestRender();
+            awaitStage(
+                presentsPerCycle,
+                "context recreation " + cycle
+            );
+            backends.add(graphicsApi().toString());
+        }
+
+        return new ContextRecreationResult(
+            cycles,
+            contextInitializations.get()
+                - contextInitializationsBefore,
+            renderCallbacks.get() - callbacksBefore,
+            completedPresents.get() - presentsBefore,
+            String.join(">", backends),
+            SleepWakeEvidence.CONTEXT_RECREATE_PROXY,
+            LiteralSleepWakeStatus.ACCEPTED_EVIDENCE_GAP
         );
     }
 
@@ -284,16 +352,58 @@ public final class GpuRecoveryFrame implements AutoCloseable {
         return new java.awt.Point(x, y);
     }
 
-    private void beginStage(int widthPixels, int heightPixels) {
+    private ContextTarget recreateContextOnEdt() throws Exception {
+        var previousContext = lastInitializedContext;
+        SwingUtilities.invokeAndWait(() -> {
+            layer.dispose();
+            frame.getContentPane().remove(layer);
+            frame.getContentPane().add(layer, BorderLayout.CENTER);
+            frame.validate();
+            layer.needRender(false);
+        });
+
+        var contextId = awaitContextAfter(previousContext);
+        return new ContextTarget(currentTargetOnEdt(), contextId);
+    }
+
+    private long awaitContextAfter(long previousContext)
+        throws Exception {
+        var deadline = System.nanoTime() + STAGE_TIMEOUT_NANOS;
+        synchronized (progress) {
+            while (lastInitializedContext <= previousContext) {
+                checkFailure();
+                if (System.nanoTime() >= deadline) {
+                    throw new IllegalStateException(
+                        "Skiko did not initialize a replacement "
+                            + "backend context within 10s."
+                    );
+                }
+                progress.wait(PROGRESS_WAIT_MILLIS);
+            }
+            return lastInitializedContext;
+        }
+    }
+
+    private void beginStage(
+        int widthPixels,
+        int heightPixels,
+        long contextId
+    ) {
         if (widthPixels < 1 || heightPixels < 1) {
             throw new IllegalStateException(
                 "Resize produced an empty SkiaLayer surface: "
                     + widthPixels + "x" + heightPixels + "."
             );
         }
+        if (contextId < 1L) {
+            throw new IllegalStateException(
+                "No initialized Skiko backend context is available."
+            );
+        }
         synchronized (progress) {
             ++activeGeneration;
             matchedGeneration = 0L;
+            expectedContextId = contextId;
             expectedWidthPixels = widthPixels;
             expectedHeightPixels = heightPixels;
             stageCallbacks = 0;
@@ -321,7 +431,8 @@ public final class GpuRecoveryFrame implements AutoCloseable {
                             + ", completedPresents=" + stagePresents
                             + ", expected="
                             + expectedWidthPixels + "x"
-                            + expectedHeightPixels + " within 10s."
+                            + expectedHeightPixels + ", context="
+                            + expectedContextId + " within 10s."
                     );
                 }
                 progress.wait(PROGRESS_WAIT_MILLIS);
@@ -368,22 +479,36 @@ public final class GpuRecoveryFrame implements AutoCloseable {
         }
     }
 
-    private void beforeBackendFrame() {
+    private void contextInitialized(long contextId) {
+        contextInitializations.incrementAndGet();
+        lastInitializedContext = contextId;
         synchronized (progress) {
-            drawingGeneration.set(
+            progress.notifyAll();
+        }
+    }
+
+    private void beforeBackendFrame(long contextId) {
+        synchronized (progress) {
+            var generation =
                 matchedGeneration == activeGeneration
-                    ? activeGeneration
-                    : 0L
+                    && contextId == expectedContextId
+                        ? activeGeneration
+                        : 0L;
+            drawingFrame.set(
+                new BackendFrame(generation, contextId)
             );
         }
     }
 
     private void afterBackendFrame() {
         completedPresents.incrementAndGet();
-        var generation = drawingGeneration.get();
-        drawingGeneration.remove();
+        var backendFrame = drawingFrame.get();
+        drawingFrame.remove();
         synchronized (progress) {
-            if (generation > 0L && generation == activeGeneration) {
+            if (backendFrame != null
+                && backendFrame.generation() > 0L
+                && backendFrame.generation() == activeGeneration
+                && backendFrame.contextId() == expectedContextId) {
                 ++stagePresents;
             }
             progress.notifyAll();
@@ -444,10 +569,16 @@ public final class GpuRecoveryFrame implements AutoCloseable {
             GraphicsApi api,
             String deviceName
         ) {
+            var contextId = nextContextId.incrementAndGet();
             return new DeviceAnalytics() {
                 @Override
+                public void contextInit() {
+                    contextInitialized(contextId);
+                }
+
+                @Override
                 public void beforeFrameRender() {
-                    beforeBackendFrame();
+                    beforeBackendFrame(contextId);
                 }
 
                 @Override
@@ -462,6 +593,16 @@ public final class GpuRecoveryFrame implements AutoCloseable {
         int widthPixels,
         int heightPixels,
         float contentScale
+    ) {}
+
+    private record ContextTarget(
+        SurfaceTarget surface,
+        long contextId
+    ) {}
+
+    private record BackendFrame(
+        long generation,
+        long contextId
     ) {}
 
     /** Counters from the resize recovery sequence. */
@@ -485,5 +626,26 @@ public final class GpuRecoveryFrame implements AutoCloseable {
         int visitedMonitors,
         long completedPresents,
         MonitorMoveStatus status
+    ) {}
+
+    /** What the deterministic Slice 3 proxy actually exercises. */
+    public enum SleepWakeEvidence {
+        CONTEXT_RECREATE_PROXY
+    }
+
+    /** Status of literal operating-system sleep/wake evidence. */
+    public enum LiteralSleepWakeStatus {
+        ACCEPTED_EVIDENCE_GAP
+    }
+
+    /** Counters from the deterministic context-loss proxy. */
+    public record ContextRecreationResult(
+        int cycles,
+        long contextInitializations,
+        long renderCallbacks,
+        long completedPresents,
+        String backends,
+        SleepWakeEvidence sleepWake,
+        LiteralSleepWakeStatus literalSleepWake
     ) {}
 }
