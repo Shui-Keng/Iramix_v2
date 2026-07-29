@@ -10,8 +10,8 @@ At 48 kHz:
 | Buffer | Deadline | Engine p99 target | Phase 0 status |
 |---|---:|---:|---|
 | 64 samples | 1.33 ms | <= 0.93 ms | **Unvalidated** — no device on the reference machine delivers this period (R-15) |
-| 128 samples | 2.67 ms | <= 1.87 ms | Met on ASIO4ALL only; WASAPI cannot open it |
-| 256 samples | 5.33 ms | <= 3.73 ms | Met on both Windows backends |
+| 128 samples | 2.67 ms | <= 1.87 ms | Met on ASIO4ALL, including a full-length soak; WASAPI cannot open it |
+| 256 samples | 5.33 ms | <= 3.73 ms | Met on both Windows backends; soaked on ASIO4ALL |
 
 The engine p99 target reserves 30% of the callback deadline for operating
 system jitter and safety margin.
@@ -25,7 +25,14 @@ Additional gates:
 
 - zero heap allocations in the callback after startup;
 - zero blocking locks in the callback;
-- zero engine-caused dropouts in a two-hour reference soak test;
+- zero engine-caused dropouts in a two-hour reference soak test — **met on
+  Windows at 128 and 256 frames**
+  ([`results/AUDIO_CALLBACK_SOAK_WINDOWS_2026-07-29.md`](results/AUDIO_CALLBACK_SOAK_WINDOWS_2026-07-29.md)):
+  2,400 seconds each, 1,349,419 callbacks, zero target misses, zero hard
+  deadline misses, zero allocations, zero blocking locks. Not attempted at
+  64 frames (R-15) and never run on macOS or Linux (R-13). Callback
+  *delivery* was not perfect — 99.9403% coverage at 128 frames — but that
+  is the wrapper driver's cadence, not an engine deadline miss;
 - deterministic offline render mode;
 - bounded behavior when event or telemetry queues are full.
 
