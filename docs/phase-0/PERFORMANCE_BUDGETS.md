@@ -7,11 +7,11 @@ sessions must be recorded beside every result.
 
 At 48 kHz:
 
-| Buffer | Deadline | Engine p99 target |
-|---|---:|---:|
-| 64 samples | 1.33 ms | <= 0.93 ms |
-| 128 samples | 2.67 ms | <= 1.87 ms |
-| 256 samples | 5.33 ms | <= 3.73 ms |
+| Buffer | Deadline | Engine p99 target | Phase 0 status |
+|---|---:|---:|---|
+| 64 samples | 1.33 ms | <= 0.93 ms | **Unvalidated** — no device on the reference machine delivers this period (R-15) |
+| 128 samples | 2.67 ms | <= 1.87 ms | Met on ASIO4ALL only; WASAPI cannot open it |
+| 256 samples | 5.33 ms | <= 3.73 ms | Met on both Windows backends |
 
 The engine p99 target reserves 30% of the callback deadline for operating
 system jitter and safety margin.
@@ -39,6 +39,23 @@ The follow-up
 64, 128, and 256 frames. Callback execution p99 met all three targets, but the
 64-frame run delivered only 87.416% of its nominal callback cadence. P0-008
 therefore remains open, alongside the two-hour and cross-platform evidence.
+
+### The 64-frame row is unvalidated, not failed
+
+[`64-frame feasibility`](results/AUDIO_CALLBACK_64_FRAME_FEASIBILITY_2026-07-29.md)
+established that no device available to this project delivers a 64-frame
+period. The default WASAPI endpoint has one legal engine period and it is
+512 frames; `ASIO4ALL v2` accepts the request but sustains 83.448% of the
+nominal cadence, evenly across the whole run. Measuring 64 frames requires
+an audio interface with its own clock and vendor ASIO driver, which the
+project does not have and is not acquiring in Phase 0 (R-15, accepted).
+
+The row stays in this table at its computed target. It is **not** marked
+failed, because the same evidence rules the engine out as the cause: at 64
+frames the callback finishes in 0.0129 ms against the 0.93 ms target, with
+zero deadline misses. Deleting the row would lose the target; marking it
+failed would record a conclusion the evidence contradicts. It is carried
+forward as an open question for Phase 1 hardware.
 
 The first
 [`WASAPI immutable-graph integration screening`](results/WASAPI_GRAPH_INTEGRATION_WINDOWS_2026-07-27.md)
