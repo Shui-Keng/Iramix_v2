@@ -41,7 +41,7 @@ than activity.
 | 7 | Benchmark results on declared reference machines | **Windows only**, by decision (R-13). Hosted CI is used for portability and sanitizers, never for timing |
 | 8 | Dependency and licensing inventory | **Met**, with four obligations open (L-1 to L-4) that gate any distributable build |
 | 9 | Architecture decisions and risk register | **Met** |
-| 10 | Phase 1 backlog with estimates and owners | **Partially met.** [`PHASE_1_BACKLOG.md`](PHASE_1_BACKLOG.md) delivers the backlog with structural sizing. **Owners are unassigned** — this project has no recorded team, which is itself the subject of R-01 |
+| 10 | Phase 1 backlog with estimates and owners | **Partially met.** [`PHASE_1_BACKLOG.md`](PHASE_1_BACKLOG.md) delivers the backlog with structural sizing. Owners are unassigned because *(recorded 2026-07-29)* there is exactly one — a single developer working with an AI assistant. Calendar estimates are still absent: a single-person queue makes the sizes a sequence, not a schedule |
 
 Six met, one partial, one accepted as unachievable (R-16), two not met.
 None of the shortfalls is blocked by engineering.
@@ -61,7 +61,7 @@ have measured evidence or an accepted fallback before Phase 1 begins.
 
 | Risk | Prio | Rule satisfied? |
 |---|---:|---|
-| R-01 Scope exceeds available team capacity | 25 | **No.** The response is "enforce the v1 scope contract and validate team size". Neither happened. There is no recorded team size, so the risk cannot even be evaluated |
+| R-01 Scope exceeds available team capacity | 25 | **No.** *Updated 2026-07-29:* the team size is now recorded — one developer plus an AI assistant — so half the response is done and the risk is evaluable. The other half is not: `V1_SCOPE.md`'s 34 must-ship items have not been re-cut against that number, and no explicit acceptance of the overrun exists. A headcount is not a fallback |
 | R-02 Plugin crash or hang destabilizes audio | 20 | Yes — measured against real third-party plugins, both fault kinds |
 | R-13 No macOS or Linux hardware | 20 | Yes — explicitly accepted, with the reasoning recorded |
 | R-15 No native hardware audio interface | 20 | Yes — explicitly accepted; the 64-frame budget is recorded as unvalidated rather than met or failed |
@@ -179,6 +179,7 @@ device callback; real HiDPI surfaces, IME, accessibility, and focus.
   production-ready. Phase 0 validates architecture, not products.
 - The verdict rests on the register's priority scores, which are
   human judgements that have not been recalibrated since they were set.
-- Owner assignment and calendar estimates are absent from the Phase 1
-  backlog because the project has no recorded team. Any schedule read
-  into it would be invented.
+- Calendar estimates are absent from the Phase 1 backlog. The team is one
+  developer (recorded 2026-07-29), so the sizes describe a sequence rather
+  than a schedule, and nothing in the backlog can run in parallel. Any
+  delivery date read into it would be invented.
